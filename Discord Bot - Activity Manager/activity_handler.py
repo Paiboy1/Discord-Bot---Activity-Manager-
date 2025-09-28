@@ -56,7 +56,7 @@ class ActivityHandler:
     async def process_activity_approval(self, message):
         # Process approved activity log
         try:
-            # Extract and validate time data again
+            # Extract and validate time data 
             time_data = self.extract_time_data(message.content)
             if not time_data:
                 print("Error: Could not extract time data during approval")
@@ -67,21 +67,28 @@ class ActivityHandler:
             
             print(f"Processing approved activity for: {user_name}")
 
-            # Update activity checkbox in spreadsheet
-            if not self.sheets_manager.update_activity_checkbox(user_name):
-                print(f"Error: Could not find {user_name} in spreadsheet")
-                return
+            # Check if user is on LOA before updating activity checkbox
+            is_on_loa = self.sheets_manager.is_user_on_loa(user_name)
+            
+            if not is_on_loa:
+                # Only update activity checkbox if user is NOT on LOA
+                if not self.sheets_manager.update_activity_checkbox(user_name):
+                    print(f"Error: Could not find {user_name} in spreadsheet")
+                    return
+            else:
+                print(f"User {user_name} is on LOA - skipping activity checkbox update")
 
-            # Handle points awarding
+            # Handle points awarding (this should happen regardless of LOA status)
             if hours < MIN_HOURS_FOR_POINTS:
                 # MAKE SURE THERE'S NO add_reaction HERE
+                loa_note = " (LOA - activity not counted but time logged)" if is_on_loa else ""
                 await message.reply(
-                    "✅ Logged! Please note that this log does not meet the minimum requirement of 1 hour and will not be counted towards points.",
+                    f"✅ Logged! Please note that this log does not meet the minimum requirement of 1 hour and will not be counted towards points.",
                     mention_author=False
                 )
             else:
                 # MAKE SURE THERE'S NO add_reaction IN award_points EITHER
-                await self.award_points(message.author.id, hours, mins, user_name, message)
+                await self.award_points(message.author.id, hours, mins, user_name, message, is_on_loa)
 
         except Exception as e:
             print(f"Error processing activity approval: {e}")
@@ -113,8 +120,7 @@ class ActivityHandler:
         
         return None
     
-    async def award_points(self, discord_user_id, hours, mins, username, message):
-        
+    async def award_points(self, discord_user_id, hours, mins, username, message, is_on_loa=False):
         points_to_award = hours * POINTS_PER_HOUR
         
         # Get current points from spreadsheet
@@ -132,27 +138,49 @@ class ActivityHandler:
             # Save new total to spreadsheet
             self.sheets_manager.save_points_to_spreadsheet(str(discord_user_id), new_total, username)
             
-            await message.reply(
-                f"✅ **Activity Logged Successfully!**\n"
-                f"• Time logged: {hours} hours {mins} mins\n"
-                f"• Points awarded: {points_to_award} points\n"
-                f"• Total points: {new_total} points\n",
-                mention_author=False
-            )
+            # Different messages based on LOA status
+            if is_on_loa:
+                await message.reply(
+                    f"✅ **Activity Logged Successfully!**\n"
+                    f"• Time logged: {hours} hours {mins} mins\n"
+                    f"• Points awarded: {points_to_award} points\n"
+                    f"• Total points: {new_total} points\n"
+                    f"• **Note:** You are on LOA - points awarded but activity not counted",
+                    mention_author=False
+                )
+            else:
+                await message.reply(
+                    f"✅ **Activity Logged Successfully!**\n"
+                    f"• Time logged: {hours} hours {mins} mins\n"
+                    f"• Points awarded: {points_to_award} points\n"
+                    f"• Total points: {new_total} points\n",
+                    mention_author=False
+                )
             
         except Exception as e:
             print(f"Error getting current points for {username}: {e}")
-            # Fallback to in-memory tracking if spreadsheet fails
+            # Fallback logic with LOA check
             if username not in self.user_points:
                 self.user_points[username] = 0
             self.user_points[username] += points_to_award
             
             self.sheets_manager.save_points_to_spreadsheet(str(discord_user_id), self.user_points[username], username)
             
-            await message.reply(
-                f"✅ **Activity Logged Successfully!**\n"
-                f"• Time logged: {hours} hours {mins} mins\n"
-                f"• Points awarded: {points_to_award} points\n"
-                f"• Total points: {self.user_points[username]} points\n",
-                mention_author=False
-            )
+            # Different messages based on LOA status
+            if is_on_loa:
+                await message.reply(
+                    f"✅ **Activity Logged Successfully!**\n"
+                    f"• Time logged: {hours} hours {mins} mins\n"
+                    f"• Points awarded: {points_to_award} points\n"
+                    f"• Total points: {self.user_points[username]} points\n"
+                    f"• **Note:** You are on LOA - points awarded but activity not counted",
+                    mention_author=False
+                )
+            else:
+                await message.reply(
+                    f"✅ **Activity Logged Successfully!**\n"
+                    f"• Time logged: {hours} hours {mins} mins\n"
+                    f"• Points awarded: {points_to_award} points\n"
+                    f"• Total points: {self.user_points[username]} points\n",
+                    mention_author=False
+                )

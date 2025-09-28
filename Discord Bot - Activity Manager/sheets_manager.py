@@ -37,6 +37,23 @@ class SheetsManager:
             print(f"Error checking if user exists: {e}")
             return False
     
+    def is_user_on_loa(self, username):
+        # Check if a user is currently on LOA
+        try:
+            cell = self.worksheet.find(username)
+            row_index = cell.row
+            
+            # Check the LOA Notice column
+            loa_notice_cell = self.worksheet.cell(row_index, LOA_NOTICE_COLUMN + 1)
+            loa_status = loa_notice_cell.value
+            
+            # User is on LOA if the LOA Notice column contains "LoA"
+            return loa_status == "LoA"
+            
+        except Exception as e:
+            print(f"Error checking LOA status for {username}: {e}")
+            return False
+
     def create_new_user_entry(self, username, discord_id, squadron):
         # Create a new user entry by copying the last user row and modifying values
         try:
