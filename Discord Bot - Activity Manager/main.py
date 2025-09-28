@@ -6,7 +6,6 @@ from config import *
 from sheets_manager import SheetsManager
 from commands import Commands
 from activity_handler import ActivityHandler
-from tasks import BackgroundTasks
 from loa_handler import LOAHandler
 
 # Initialize components
@@ -24,7 +23,6 @@ bot = commands.Bot(command_prefix='!', intents=intents)
 # Initialize handlers
 activity_handler = ActivityHandler(sheets_manager, user_points)
 commands_handler = Commands(bot, sheets_manager, user_points)
-background_tasks = BackgroundTasks(sheets_manager)
 loa_handler = LOAHandler(sheets_manager)
 
 def get_squadron_from_roles(member):
@@ -56,9 +54,6 @@ async def on_ready():
     
     # Setup commands
     commands_handler.setup_commands()
-    
-    # Start background tasks
-    background_tasks.start_tasks(bot)
     
     # Join forum threads
     await join_forum_threads()
