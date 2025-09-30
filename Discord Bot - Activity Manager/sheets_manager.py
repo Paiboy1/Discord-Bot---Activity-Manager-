@@ -91,8 +91,9 @@ class SheetsManager:
             # Set Squadron 
             self.worksheet.update_cell(next_row, 7, squadron)
             
-            # Set Status to Inactive
-            self.worksheet.update_cell(next_row, 9, "Inactive")
+            # Set Status to formula
+            status_formula = f'=IF(J{next_row}=TRUE;"Active";"Inactive")'
+            self.worksheet.update_cell(next_row, 9, status_formula)
             
             # Uncheck Activity checkbox 
             self.worksheet.update_cell(next_row, 10, False)
