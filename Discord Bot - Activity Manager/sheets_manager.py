@@ -339,3 +339,40 @@ class SheetsManager:
         except Exception as e:
             print(f"Error updating activity checkbox for {username}: {e}")
             return False
+    
+    def check_promotion_eligibility(self, username):
+        # Check if user is eligible for promotion based on points and current rank
+        try:
+            cell = self.worksheet.find(username)
+            row_index = cell.row
+            
+            # Get current points and rank
+            points_cell = self.worksheet.cell(row_index, POINTS_COLUMN + 1)
+            points = int(points_cell.value) if points_cell.value and str(points_cell.value).isdigit() else 0
+            
+            rank_cell = self.worksheet.cell(row_index, RANK_COLUMN) 
+            current_rank = rank_cell.value if rank_cell.value else ""
+            
+            # Define promotion requirements
+            promotions = {
+                "E1": {"next_rank": "E2", "points_needed": 10, "needs_app": False},
+                "E2": {"next_rank": "E3", "points_needed": 30, "needs_app": False},
+                "E3": {"next_rank": "E4", "points_needed": 50, "needs_app": True},
+                "E4": {"next_rank": "E5", "points_needed": 70, "needs_app": False},  # Needs MR Ascension
+            }
+            
+            if current_rank in promotions:
+                promo_info = promotions[current_rank]
+                
+                if points >= promo_info["points_needed"]:
+                    return {
+                        "eligible": True,
+                        "next_rank": promo_info["next_rank"],
+                        "needs_application": promo_info["needs_app"]
+                    }
+            
+            return {"eligible": False}
+            
+        except Exception as e:
+            print(f"Error checking promotion eligibility for {username}: {e}")
+            return {"eligible": False}

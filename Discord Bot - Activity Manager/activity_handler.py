@@ -137,6 +137,18 @@ class ActivityHandler:
             
             # Save new total to spreadsheet
             self.sheets_manager.save_points_to_spreadsheet(str(discord_user_id), new_total, username)
+
+             # Check promotion eligibility after updating points
+            promo_check = self.sheets_manager.check_promotion_eligibility(username)
+            
+            # Build promotion message if eligible
+            promo_message = ""
+            if promo_check["eligible"]:
+                if promo_check["needs_application"]:
+                    promo_message = f"\n• **🎖️ Promotion Available:** Eligible for **{promo_check['next_rank']}**\n• Please complete the MR Ascension form: {MR_ASCENSION_FORM_URL} to be eligible for **E5**"
+                else:
+                    promo_message = f"\n• **🎖️ Promotion Available:** Eligible for **{promo_check['next_rank']}**"
+        
             
             # Different messages based on LOA status
             if is_on_loa:
@@ -149,38 +161,17 @@ class ActivityHandler:
                     mention_author=False
                 )
             else:
+                # Check if this is specifically the MR Ascension promotion
+                mention_user = promo_check.get("needs_application", False)
+
                 await message.reply(
                     f"✅ **Activity Logged Successfully!**\n"
                     f"• Time logged: {hours} hours {mins} mins\n"
                     f"• Points awarded: {points_to_award} points\n"
-                    f"• Total points: {new_total} points\n",
+                    f"• Total points: {new_total} points\n"
+                    f"{promo_message}",
                     mention_author=False
                 )
             
         except Exception as e:
             print(f"Error getting current points for {username}: {e}")
-            # Fallback logic with LOA check
-            if username not in self.user_points:
-                self.user_points[username] = 0
-            self.user_points[username] += points_to_award
-            
-            self.sheets_manager.save_points_to_spreadsheet(str(discord_user_id), self.user_points[username], username)
-            
-            # Different messages based on LOA status
-            if is_on_loa:
-                await message.reply(
-                    f"✅ **Activity Logged Successfully!**\n"
-                    f"• Time logged: {hours} hours {mins} mins\n"
-                    f"• Points awarded: {points_to_award} points\n"
-                    f"• Total points: {self.user_points[username]} points\n"
-                    f"• **Note:** You are on LOA - points awarded but activity not counted",
-                    mention_author=False
-                )
-            else:
-                await message.reply(
-                    f"✅ **Activity Logged Successfully!**\n"
-                    f"• Time logged: {hours} hours {mins} mins\n"
-                    f"• Points awarded: {points_to_award} points\n"
-                    f"• Total points: {self.user_points[username]} points\n",
-                    mention_author=False
-                )

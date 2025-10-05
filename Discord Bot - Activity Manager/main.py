@@ -114,6 +114,13 @@ async def on_message(message):
     if (hasattr(message.channel, 'parent_id') and 
         message.channel.parent_id == FORUM_CHANNEL_ID and 
         "Total time:" in message.content):
+        
+        # Skip the first message to avoid this sending if someone puts format in description
+        messages = [msg async for msg in message.channel.history(limit=2, oldest_first=True)]
+        if len(messages) > 0 and messages[0].id == message.id:
+            # This is the first message, ignore it
+            return
+        
         await activity_handler.process_activity_log(message)
     
     await bot.process_commands(message)
