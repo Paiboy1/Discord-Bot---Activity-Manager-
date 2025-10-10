@@ -1,5 +1,6 @@
 # main.py - Main Discord bot file
 
+import re
 import discord
 from discord.ext import commands
 from config import *
@@ -11,6 +12,11 @@ from loa_handler import LOAHandler
 # Initialize components
 sheets_manager = SheetsManager()
 user_points = {}
+active_log = {}
+pending_proof = {}
+
+# Load timezones from file
+timezone_offsets = sheets_manager.load_timezones_from_txt()
 
 # Bot setup
 intents = discord.Intents.default()
@@ -22,7 +28,7 @@ bot = commands.Bot(command_prefix='!', intents=intents)
 
 # Initialize handlers
 activity_handler = ActivityHandler(sheets_manager, user_points)
-commands_handler = Commands(bot, sheets_manager, user_points)
+commands_handler = Commands(bot, sheets_manager, user_points, active_log, pending_proof)
 loa_handler = LOAHandler(sheets_manager)
 
 def get_squadron_from_roles(member):
@@ -61,6 +67,9 @@ async def on_ready():
 @bot.event
 async def on_thread_create(thread):
     # Handle new thread creation in forum channel
+    if thread.guild.id != SERVER_ID:
+        return
+    
     if thread.parent_id == FORUM_CHANNEL_ID:
         username = thread.name
         
@@ -81,20 +90,20 @@ async def on_thread_create(thread):
         
         # Send welcome message
         message_content = (
-            f"**Welcome to TF-416, {thread.owner.mention}!**\n"
-            "I am the activity manager for this department. Please send your logs in the following format:\n\n"
-            "```\n"
-            "Start time: xx:xx (timezone)\n"
-            "End time: xx:xx (timezone)\n"
-            "Total time: xx hours xx mins\n"
-            "Proof:\n"
-            "```\n"
-            "Total time also allows:\n"
-            "```\n"
-            "Total time: xx hour(s)\n"
-            "Total time: xx mins\n"
-            "```\n"
-            "You must have at least 1 hour in your log to earn points."
+            f"**Welcome to TF-416, {thread.owner.mention}!**\n\n"
+            "I am the **Activity Manager** for this department. Please log your activity using the following slash commands:\n\n"
+            
+            "1. **Start Session:** Use `/clockin timezone:`\n"
+            "   * Example: `/clockin timezone:BST`*\n\n"
+            
+            "2. **End Session:** Use `/clockout` (Optional: add a `note:`)\n"
+            "   * Example: `/clockout note:I was with so and so for an hour`*\n\n"
+            
+            "3. **Post Proof:** After clocking out, submit your **proof image** here in this thread. The bot will automatically post your formatted log.\n\n"
+            
+            "**⚠️ Important Log Rules:**\n"
+            "• You must have at least **1 hour** in your log to earn points.\n"
+            "• Don't try log in any other way, it will NOT be accepted otherwise"
         )
         await thread.send(message_content)
 
@@ -104,6 +113,81 @@ async def on_message(message):
     if message.author == bot.user:
         return
     
+    if message.guild and message.guild.id != SERVER_ID:
+        return
+        
+    # Handles image proofs for activity logs
+    if  (hasattr(message.channel, 'parent_id') and 
+        message.channel.parent_id == FORUM_CHANNEL_ID and
+        message.author.id in pending_proof and
+        message.attachments):
+            
+        session_data = pending_proof.pop(message.author.id)
+            
+        # Format the times with timezone
+        tz_str = session_data.get("timezone", "UTC")
+        start_time = session_data["start_time"]
+        end_time = session_data["end_time"]
+
+        # Makes sure it appears as the correct timezone    
+        user_tz_str = session_data.get("timezone")
+        offset_hours = commands_handler.parse_timezone(user_tz_str)
+
+        if offset_hours is not None:
+            from datetime import timedelta, timezone as tz
+            user_offset = tz(timedelta(hours=offset_hours))
+            
+            # Convert times to user's timezone
+            start_local = start_time.replace(tzinfo=tz.utc).astimezone(user_offset)
+            end_local = end_time.replace(tzinfo=tz.utc).astimezone(user_offset)
+            
+            # Format with timezone
+            start_time_str = start_local.strftime("%H:%M")
+            end_time_str = end_local.strftime("%H:%M")
+        else:
+            return
+            
+        # Calculate hours and minutes
+        total_seconds = int(session_data["total_time"].total_seconds())
+        hours = total_seconds // 3600
+        minutes = (total_seconds % 3600) // 60
+            
+        log_message = (
+            f"**New Activity Log Detected!**\n"
+            f"\n"
+            f"**Start time:** {start_time_str} ({tz_str})\n"
+            f"**End time:** {end_time_str} ({tz_str})\n"
+            f"**Total time:** {hours} hours {minutes} mins\n"
+            f"**Proof:**"
+        )
+
+        if "note" in session_data and session_data["note"]:
+            log_message += f"\n**Note:** {session_data['note']}"
+
+        files_to_send = []
+        for attachment in message.attachments:
+            try:
+                file = await attachment.to_file()
+                files_to_send.append(file)
+            except Exception as e:
+                # Log error but continue
+                print(f"Error downloading attachment before delete") 
+            
+        image_urls = [attachment.url for attachment in message.attachments]
+
+        await message.delete()
+            
+        # Post the formatted log with the image
+        await message.channel.send(
+            content=log_message,
+            files=files_to_send
+        )    
+        
+        files_to_send.clear()
+
+        return  
+    
+
     # Handle LOA requests in LOA channel
     if message.channel.id == LOA_CHANNEL_ID:
         if loa_handler.is_valid_loa_format(message.content):
@@ -129,6 +213,9 @@ async def on_message(message):
 async def on_raw_reaction_add(payload):
     # Handle reactions to messages (works for both cached and uncached messages)
     if payload.user_id == bot.user.id:
+        return
+    
+    if payload.guild_id != SERVER_ID:
         return
     
     # Get the channel and check if it's LOA channel
@@ -188,7 +275,7 @@ async def join_forum_threads():
     except Exception as e:
         print(f"An error occurred while joining threads: {e}")
 
-def find_username_in_title(title, usernames):
+async def find_username_in_title(title, usernames):
     # Helper function to find username in thread title
     for user in usernames:
         if user.lower() in title.lower():

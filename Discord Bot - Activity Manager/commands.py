@@ -2,7 +2,7 @@
 
 import discord
 from discord import app_commands
-from datetime import datetime, timezone
+from datetime import datetime, timezone as tz, timedelta
 from config import *
 import re
 
@@ -32,7 +32,7 @@ class LeaderboardView(discord.ui.View):
         embed = discord.Embed(
             title="Leaderboard",
             color=0x3498db,
-            timestamp=datetime.now(timezone.utc)
+            timestamp=datetime.now(tz.utc)
         )
         
         leaderboard_text = ""
@@ -63,10 +63,22 @@ class LeaderboardView(discord.ui.View):
             await interaction.response.defer()
 
 class Commands:
-    def __init__(self, bot, sheets_manager, user_points):
+    def __init__(self, bot, sheets_manager, user_points, active_log, pending_proof):
         self.bot = bot
         self.sheets_manager = sheets_manager
         self.user_points = user_points
+        self.active_log = active_log
+        self.pending_proof = pending_proof
+        self.status_board_message_id = None
+
+    async def _check_server(self, interaction: discord.Interaction) -> bool:
+        if interaction.guild_id != SERVER_ID:
+            await interaction.response.send_message(
+                "⚠️ Paiboy1 has taken the Bot down for maintenance, Will be back up soon!", 
+                ephemeral=True
+            )
+            return False
+        return True
     
     def setup_commands(self):
         # Register all slash commands with the bot
@@ -106,8 +118,107 @@ class Commands:
             callback=self.loa_remove
         ))
 
+        self.bot.tree.add_command(app_commands.Command(
+            name="clockin",
+            description="Clock in to start log timer",
+            callback=self.clockin
+        ))
+
+        self.bot.tree.add_command(app_commands.Command(
+            name="clockout",
+            description="Clock out to stop log timer",
+            callback=self.clockout
+        ))
+
+    def parse_timezone(self, timezone_str):
+        # Handle every timezone
+        if not timezone_str:
+            return None
+        
+        timezone_str = timezone_str.upper().strip()
+        
+        # Named timezones
+        named_timezones = {
+            "EST": -5, "EDT": -4,
+            "PST": -8, "PDT": -7,
+            "GMT": 0, "UTC": 0,
+            "BST": 1,
+            "CST": -6, "CDT": -5,
+            "MST": -7, "MDT": -6,
+            "IST": 5.5,  
+            "JST": 9,    
+            "AEST": 10, 
+            "CET": 2,  
+        }
+        
+        if timezone_str in named_timezones:
+            return named_timezones[timezone_str]
+        
+        # Handle GMT+X or UTC+X format
+        match = re.match(r'(GMT|UTC)([+-])(\d+(?:\.\d+)?)', timezone_str)
+        if match:
+            sign = 1 if match.group(2) == '+' else -1
+            offset = float(match.group(3))
+            return sign * offset
+        
+        return None
+    
+    async def update_status_board(self):
+        # Update the session status board
+        channel = self.bot.get_channel(SESSION_STATUS_CHANNEL_ID)
+        if not channel:
+            print("Session status channel not found")
+            return
+        
+        # Determine commander and online users
+        commander = None
+        online_users = []
+        
+        for user_id, session in self.active_log.items():
+            user = self.bot.get_user(user_id)
+            if not user:
+                continue
+            
+            # Get their rank from spreadsheet
+            username = session.get("username")
+            rank = self.sheets_manager.get_user_rank(username)
+            
+            # Check if E5 or higher for commander role
+            if rank and rank in ["E5", "E6", "E7", "E8", "E9"]:
+                if not commander:
+                    commander = user.mention
+                else:
+                    online_users.append(user.mention)
+            else:
+                online_users.append(user.mention)
+        
+        # Build message content
+        content = "**Commander**\n"
+        content += commander if commander else "None"
+        content += "\n\n**Operatives**\n"
+        content += "\n".join(online_users) if online_users else "None"
+        
+        # Create or update message
+        try:
+            # Fetch the most recent message in the channel
+            messages = [msg async for msg in channel.history(limit=10)]
+            bot_messages = [msg for msg in messages if msg.author.id == self.bot.user.id]
+            
+            if bot_messages:
+                # Edit the most recent bot message
+                await bot_messages[0].edit(content=content)
+            else:
+                # No existing message, create a new one
+                await channel.send(content, silent=True)
+        except Exception as e:
+            print(f"Error updating status board: {e}")
+            return
+
+
     async def leaderboard(self, interaction: discord.Interaction):
         # Display the activity points leaderboard with pages
+        if not await self._check_server(interaction):
+            return
         try:
             # Get all data directly from spreadsheet
             all_values = self.sheets_manager.worksheet.get_all_values()
@@ -168,7 +279,7 @@ class Commands:
                     title="Leaderboard",
                     description="No users found in the spreadsheet.",
                     color=0x3498db,
-                    timestamp=datetime.now(timezone.utc)
+                    timestamp=datetime.now(tz.utc)
                 )
                 embed.set_footer(text="Page 1/1")
                 await interaction.response.send_message(embed=embed)
@@ -189,6 +300,8 @@ class Commands:
     
     @app_commands.describe(user="Username to check points for (optional)")
     async def points(self, interaction: discord.Interaction, user: str = None):
+        if not await self._check_server(interaction):
+            return
         # Check points for a specific user
         try:
             if user:
@@ -250,6 +363,8 @@ class Commands:
     
     @app_commands.describe(amount="Number of points to add", member="Member to add points to")
     async def add_points(self, interaction: discord.Interaction, amount: int, member: discord.Member):
+        if not await self._check_server(interaction):
+            return
         # Manually add points to a user
         try:
             # Extract username from Discord member's display name
@@ -290,6 +405,8 @@ class Commands:
     
     @app_commands.describe(amount="Number of points to remove", member="Member to remove points from")
     async def remove_points(self, interaction: discord.Interaction, amount: int, member: discord.Member):
+        if not await self._check_server(interaction):
+            return
         # Manually remove points from a user
         try:
             # Extract username from Discord member's display name
@@ -334,6 +451,8 @@ class Commands:
     
     @app_commands.describe(user="Member to remove from LOA status")
     async def loa_remove(self, interaction: discord.Interaction, user: discord.Member):
+        if not await self._check_server(interaction):
+            return
         # Remove member from LOA status
         try:
             # Defer immediately to prevent timeout
@@ -372,8 +491,96 @@ class Commands:
             
         except Exception as e:
             await interaction.followup.send(f"❌ **Error:** Could not remove LOA status. {e}")
+    
+    @app_commands.describe(timezone="Your timezone (e.g., EST, PST, GMT, BST)")
+    async def clockin(self, interaction: discord.Interaction, timezone: str = None):
+        if not await self._check_server(interaction):
+            return
+        
+        if not timezone:
+            await interaction.response.send_message(
+                "⚠️ Timezone is required! Please use: `/clockin timezone:EST` (or PST, GMT, etc.)",
+                ephemeral=True
+            )
+            return
+        
+        # Get username from spreadsheet by Discord ID
+        username = self.sheets_manager.get_username_by_discord_id(str(interaction.user.id))
+
+        user_id = interaction.user.id
+        
+        # Check if already clocked in
+        if user_id in self.active_log:
+            await interaction.response.send_message(
+                "⚠️ You're already clocked in! Use `/clockout` to finish your session.",
+                ephemeral=True
+            )
+            return
+        
+        # Start tracking
+        self.active_log[user_id] = {
+            "start_time": datetime.now(tz.utc),
+            "timezone": timezone.upper() if timezone else None,
+            "username": username
+        }
+
+        # Updates session board
+        await self.update_status_board()
+        
+        tz_msg = f" ({timezone})" if timezone else ""
+        await interaction.response.send_message(
+            f"You are now **Online!** Timer started{tz_msg}",
+            ephemeral=True
+        )
+    
+    @app_commands.describe(note="Optional note to add to your activity log")
+    async def clockout(self, interaction: discord.Interaction, note: str = None):
+        if not await self._check_server(interaction):
+            return
+        
+        user_id = interaction.user.id
+        
+        # Check if the user is currently clocked in
+        if user_id not in self.active_log:
+            await interaction.response.send_message(
+                "⚠️ You are not currently clocked in. Use `/clockin` to start your session.",
+                ephemeral=True
+            )
+            return
+        
+        session_data = self.active_log.pop(user_id)
+        session_data["end_time"] = datetime.now(tz.utc)
+
+        await self.update_status_board()
+        
+        # Calculate total time
+        total_time_delta = session_data["end_time"] - session_data["start_time"]
+        session_data["total_time"] = total_time_delta
+
+        if note:
+            session_data["note"] = note
+
+        # Move session data to pending_proof
+        self.pending_proof[user_id] = session_data
+        
+        # Calculate time components for display
+        total_seconds = int(total_time_delta.total_seconds())
+        hours = total_seconds // 3600
+        minutes = (total_seconds % 3600) // 60
+        
+        # Send confirmation and request for proof
+        await interaction.response.send_message(
+            f"✅ **Clocked Out!**\n\n"
+            f"Please send your proof image in your activity thread.\n"
+            f"The log will be automatically posted after you send the image.\n",
+            ephemeral=True
+        )
+
+    
 
     async def reset_weekly(self, interaction: discord.Interaction):
+        if not await self._check_server(interaction):
+            return
         # Test the weekly reset function
         try:
             await interaction.response.defer()

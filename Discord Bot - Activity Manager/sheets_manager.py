@@ -22,6 +22,29 @@ class SheetsManager:
             print(f"Error connecting to Google Sheets: {e}")
             raise e
         
+    def load_timezones_from_txt(self):
+        timezones = {}
+        try:
+            with open('Timezones.txt', mode='r', encoding='utf-8') as file:
+                for line in file:
+                        line = line.strip()
+                        # Skip empty lines or comment lines starting with '#'
+                        if not line or line.startswith('#'):
+                            continue
+                                
+                        # Split the line by the comma
+                        parts = line.split(',')
+                            
+                        if len(parts) == 2:
+                            # [0] is the abbreviation, [1] is the offset
+                            abbrev = parts[0].strip().upper() 
+                            offset = float(parts[1].strip())
+                            timezones[abbrev] = offset
+            return timezones
+        except FileNotFoundError:
+            print(f"Timezone broke")
+            return {}
+        
     def user_exists(self, username):
         # Check if a username already exists in the spreadsheet
         try:
@@ -161,24 +184,20 @@ class SheetsManager:
             user_points.clear()
     
     def save_points_to_spreadsheet(self, discord_user_id, points, username=None):
-        """Save points to spreadsheet using username from thread title"""
+        # Save points to spreadsheet using username from thread title
         try:
             if not username:
                 print(f"No username provided, cannot save points")
                 return
-                
-            print(f"DEBUG: Saving {points} points for username: {username}")
             
             # Find the user's row by username in column B
             cell = self.worksheet.find(username)
             row_index = cell.row
             
-            print(f"DEBUG: Found {username} at row {row_index}, updating column {POINTS_COLUMN + 1}")
-            
             # Update the points column (P) for this user
             self.worksheet.update_cell(row_index, POINTS_COLUMN + 1, points)
             
-            print(f"DEBUG: Successfully saved {points} points for {username}")
+            print(f"Successfully saved {points} points for {username}")
             
         except Exception as e:
             print(f"Error saving points for {username}: {e}")
@@ -357,8 +376,8 @@ class SheetsManager:
             promotions = {
                 "E1": {"next_rank": "E2", "points_needed": 10, "needs_app": False},
                 "E2": {"next_rank": "E3", "points_needed": 30, "needs_app": False},
-                "E3": {"next_rank": "E4", "points_needed": 50, "needs_app": True},
-                "E4": {"next_rank": "E5", "points_needed": 70, "needs_app": False},  # Needs MR Ascension
+                "E3": {"next_rank": "E4", "points_needed": 50, "needs_app": True},    # Needs MR Ascension for E5
+                "E4": {"next_rank": "E5", "points_needed": 70, "needs_app": False},  
             }
             
             if current_rank in promotions:
@@ -376,3 +395,15 @@ class SheetsManager:
         except Exception as e:
             print(f"Error checking promotion eligibility for {username}: {e}")
             return {"eligible": False}
+    
+    def get_user_rank(self, username):
+        # Get user's rank from spreadsheet
+        try:
+            cell = self.worksheet.find(username)
+            row_index = cell.row
+            
+            rank_cell = self.worksheet.cell(row_index, RANK_COLUMN)
+            return rank_cell.value if rank_cell.value else None
+        except Exception as e:
+            print(f"Error getting rank for {username}: {e}")
+            return None

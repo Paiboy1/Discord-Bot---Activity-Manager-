@@ -1,5 +1,3 @@
-# activity_handler.py - Activity log processing for Discord bot
-
 import re
 import discord
 from config import *
@@ -10,8 +8,7 @@ class ActivityHandler:
         self.user_points = user_points
     
     async def process_activity_log(self, message):
-        # Main activity log processing logic - validation only, no automatic approval
-        # Check if there's at least one attachment
+        # Main activity log processing logic
         if not message.attachments:
             await message.reply(
                 "❌ **Missing Proof Image**\n\n"
@@ -49,7 +46,6 @@ class ActivityHandler:
             await message.reply("❌ **Error:** The minutes value must be between 00 and 59.", mention_author=False)
             return
 
-        # If we get here, the format is valid - do nothing else
         # Let manual reactions handle the approval/rejection
         print(f"Valid activity log format detected for: {message.channel.name}")
 
@@ -76,9 +72,9 @@ class ActivityHandler:
                     print(f"Error: Could not find {user_name} in spreadsheet")
                     return
             else:
-                print(f"User {user_name} is on LOA - skipping activity checkbox update")
+                return
 
-            # Handle points awarding (this should happen regardless of LOA status)
+            # Handle awarding points
             if hours < MIN_HOURS_FOR_POINTS:
                 # MAKE SURE THERE'S NO add_reaction HERE
                 loa_note = " (LOA - activity not counted but time logged)" if is_on_loa else ""
@@ -94,26 +90,22 @@ class ActivityHandler:
             print(f"Error processing activity approval: {e}")
     
     def extract_time_data(self, content):
-        # Extract and validate time data from message
-        # Handles these formats:
-        # - Total time: xx hours xx mins
-        # - Total time: xx hour(s) 
-        # - Total time: xx mins
+        # Extract and validate time data from their message
 
-        match = re.search(r'Total time:\s*(?P<hours>\d+)\s*hours?\s*(?P<mins>\d{1,2})\s*mins?', content, re.IGNORECASE)
+        match = re.search(r'\*\*Total time:\*\*\s*(?P<hours>\d+)\s*hours?\s*(?P<mins>\d{1,2})\s*mins?', content, re.IGNORECASE)
         if match:
             hours = int(match.group('hours'))
             mins = int(match.group('mins'))
             return (hours, mins)
         
-        # Try format: "xx hour(s)" (no minutes)
-        match = re.search(r'Total time:\s*(?P<hours>\d+)\s*hours?', content, re.IGNORECASE)
+        # "xx hour(s)" 
+        match = re.search(r'\*\*Total time:\*\*\s*(?P<hours>\d+)\s*hours?', content, re.IGNORECASE)
         if match:
             hours = int(match.group('hours'))
             return (hours, 0)
         
-        # Try format: "xx mins" (no hours)
-        match = re.search(r'Total time:\s*(?P<mins>\d{1,2})\s*mins?', content, re.IGNORECASE)
+        # "xx mins"
+        match = re.search(r'\*\*Total time:\*\*\s*(?P<mins>\d{1,2})\s*mins?', content, re.IGNORECASE)
         if match:
             mins = int(match.group('mins'))
             return (0, mins)
@@ -141,7 +133,7 @@ class ActivityHandler:
              # Check promotion eligibility after updating points
             promo_check = self.sheets_manager.check_promotion_eligibility(username)
             
-            # Build promotion message if eligible
+            # Make promotion message if eligible
             promo_message = ""
             if promo_check["eligible"]:
                 if promo_check["needs_application"]:
@@ -161,7 +153,7 @@ class ActivityHandler:
                     mention_author=False
                 )
             else:
-                # Check if this is specifically the MR Ascension promotion
+                # Check if they need the MR Ascension promotion
                 mention_user = promo_check.get("needs_application", False)
 
                 await message.reply(
