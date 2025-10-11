@@ -6,9 +6,10 @@ class ActivityHandler:
     def __init__(self, sheets_manager, user_points):
         self.sheets_manager = sheets_manager
         self.user_points = user_points
-    
+        
+    # Main activity log processing logic
     async def process_activity_log(self, message):
-        # Main activity log processing logic
+        
         if not message.attachments:
             await message.reply(
                 "❌ **Missing Proof Image**\n\n"
@@ -49,8 +50,16 @@ class ActivityHandler:
         # Let manual reactions handle the approval/rejection
         print(f"Valid activity log format detected for: {message.channel.name}")
 
+    # Process approved activity log
     async def process_activity_approval(self, message):
-        # Process approved activity log
+
+        # Is there already a rection
+        for reaction in message.reactions:
+            if str(reaction.emoji) == "✅":
+                async for user in reaction.users():
+                    if user.id == message.guild.get_member_named(message.author.name).bot.user.id:
+                        return
+
         try:
             # Extract and validate time data 
             time_data = self.extract_time_data(message.content)
@@ -88,9 +97,10 @@ class ActivityHandler:
 
         except Exception as e:
             print(f"Error processing activity approval: {e}")
-    
+
+    # Extract and validate time data from their message    
     def extract_time_data(self, content):
-        # Extract and validate time data from their message
+        
 
         match = re.search(r'\*\*Total time:\*\*\s*(?P<hours>\d+)\s*hours?\s*(?P<mins>\d{1,2})\s*mins?', content, re.IGNORECASE)
         if match:
@@ -112,6 +122,7 @@ class ActivityHandler:
         
         return None
     
+    # Award points from activity logs
     async def award_points(self, discord_user_id, hours, mins, username, message, is_on_loa=False):
         points_to_award = hours * POINTS_PER_HOUR
         

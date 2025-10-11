@@ -170,9 +170,21 @@ class Commands:
             print("Session status channel not found")
             return
         
-        # Determine commander and online users
-        commander = None
-        online_users = []
+        # Define rank hierarchy
+        rank_hierarchy = {
+            "E9": 9,
+            "E8": 8,
+            "E7": 7,
+            "E6": 6,
+            "E5": 5,
+            "E4": 4,
+            "E3": 3,
+            "E2": 2,
+            "E1": 1
+        }
+        
+        # Collect all online users with their ranks
+        online_data = []
         
         for user_id, session in self.active_log.items():
             user = self.bot.get_user(user_id)
@@ -183,24 +195,39 @@ class Commands:
             username = session.get("username")
             rank = self.sheets_manager.get_user_rank(username)
             
-            # Check if E5 or higher for commander role
-            if rank and rank in ["E5", "E6", "E7", "E8", "E9"]:
-                if not commander:
-                    commander = user.mention
-                else:
-                    online_users.append(user.mention)
+            # Get rank value
+            rank_value = rank_hierarchy.get(rank, 0)
+            
+            online_data.append({
+                "user": user,
+                "rank": rank,
+                "rank_value": rank_value
+            })
+        
+        # Sort by rank
+        online_data.sort(key=lambda x: x["rank_value"], reverse=True)
+        
+        commander = None
+        operatives = []
+        
+        if online_data:
+            # Check if highest ranked person is E5 or above
+            if online_data[0]["rank_value"] >= 5:  # E5 or higher
+                commander = online_data[0]["user"].mention
+                # Everyone else goes to operatives
+                operatives = [person["user"].mention for person in online_data[1:]]
             else:
-                online_users.append(user.mention)
+                # No one is E5+, no commander
+                operatives = [person["user"].mention for person in online_data]
         
         # Build message content
         content = "**Commander**\n"
         content += commander if commander else "None"
         content += "\n\n**Operatives**\n"
-        content += "\n".join(online_users) if online_users else "None"
+        content += "\n".join(operatives) if operatives else "None"
         
         # Create or update message
         try:
-            # Fetch the most recent message in the channel
             messages = [msg async for msg in channel.history(limit=10)]
             bot_messages = [msg for msg in messages if msg.author.id == self.bot.user.id]
             
@@ -214,9 +241,9 @@ class Commands:
             print(f"Error updating status board: {e}")
             return
 
-
+    # Display the activity points leaderboard with pages
     async def leaderboard(self, interaction: discord.Interaction):
-        # Display the activity points leaderboard with pages
+        
         if not await self._check_server(interaction):
             return
         try:
@@ -297,32 +324,23 @@ class Commands:
         except Exception as e:
             await interaction.response.send_message(f"⚠ **Error:** Could not generate leaderboard. {e}")
 
-    
-    @app_commands.describe(user="Username to check points for (optional)")
-    async def points(self, interaction: discord.Interaction, user: str = None):
+    # Check points for a specific user
+    @app_commands.describe(user="Member to check points for (optional)")
+    async def points(self, interaction: discord.Interaction, user: discord.Member = None):
         if not await self._check_server(interaction):
             return
-        # Check points for a specific user
+       
         try:
             if user:
-                # Check if this is a Discord mention format <@123456789>
-                import re
-                mention_match = re.match(r'<@(\d+)>', user)
+                # User is a Discord Member object, get their ID
+                discord_id = str(user.id)
+                username = self.sheets_manager.get_username_by_discord_id(discord_id)
                 
-                if mention_match:
-                    # This is a Discord mention, extract the Discord ID
-                    discord_id = mention_match.group(1)
-                    username = self.sheets_manager.get_username_by_discord_id(discord_id)
-                    
-                    if not username:
-                        await interaction.response.send_message(f"❌ **Error:** Could not find Discord ID '{discord_id}' in the roster spreadsheet.")
-                        return
-                else:
-                    # This is a regular username string, clean it
-                    # First remove @ symbol if present
-                    user_clean = user.lstrip('@')
-                    # Then remove rank prefixes like [SGT], (RANK), etc.
-                    username = re.sub(r'^(\[.*?\]|\(.*?\)|[A-Z]+\d*\s*-\s*)', '', user_clean).strip()
+                if not username:
+                    await interaction.response.send_message(
+                        f"❌ **Error:** Could not find Discord ID for {user.mention} in the roster spreadsheet."
+                    )
+                    return
                 
                 # Now look up the points for the username
                 try:
@@ -360,17 +378,17 @@ class Commands:
                     
         except Exception as e:
             await interaction.response.send_message(f"❌ **Error:** Could not check points. {e}")
-    
+
+    # Manually add points to a user
     @app_commands.describe(amount="Number of points to add", member="Member to add points to")
     async def add_points(self, interaction: discord.Interaction, amount: int, member: discord.Member):
         if not await self._check_server(interaction):
             return
-        # Manually add points to a user
+        
         try:
             # Extract username from Discord member's display name
             import re
-            cleaned_name = re.sub(r'^(\[.*?\]|\(.*?\)|[A-Z]+\d*\s*-\s*)', '', member.display_name).strip()
-            username = cleaned_name
+            username = str(member.id)
             
             # Get current points from spreadsheet
             try:
@@ -403,16 +421,15 @@ class Commands:
         except Exception as e:
             await interaction.response.send_message(f"❌ **Error:** Could not add points. {e}")
     
+    # Manually remove points from a user
     @app_commands.describe(amount="Number of points to remove", member="Member to remove points from")
     async def remove_points(self, interaction: discord.Interaction, amount: int, member: discord.Member):
         if not await self._check_server(interaction):
             return
-        # Manually remove points from a user
         try:
             # Extract username from Discord member's display name
             import re
-            cleaned_name = re.sub(r'^(\[.*?\]|\(.*?\)|[A-Z]+\d*\s*-\s*)', '', member.display_name).strip()
-            username = cleaned_name
+            username = str(member.id)
             
             # Get current points from spreadsheet
             try:
@@ -449,17 +466,18 @@ class Commands:
         except Exception as e:
             await interaction.response.send_message(f"❌ **Error:** Could not remove points. {e}")
     
+    # Remove member from LOA status
     @app_commands.describe(user="Member to remove from LOA status")
     async def loa_remove(self, interaction: discord.Interaction, user: discord.Member):
         if not await self._check_server(interaction):
             return
-        # Remove member from LOA status
+
         try:
             # Defer immediately to prevent timeout
             await interaction.response.defer()
             
             # First try to get username by Discord ID from spreadsheet
-            username = self.sheets_manager.get_username_by_discord_id(str(user.id))
+            username = str(user.id)
             
             if not username:
                 # If not found by Discord ID, try to extract from display name
@@ -492,6 +510,7 @@ class Commands:
         except Exception as e:
             await interaction.followup.send(f"❌ **Error:** Could not remove LOA status. {e}")
     
+    # Clock into session status
     @app_commands.describe(timezone="Your timezone (e.g., EST, PST, GMT, BST)")
     async def clockin(self, interaction: discord.Interaction, timezone: str = None):
         if not await self._check_server(interaction):
@@ -533,6 +552,7 @@ class Commands:
             ephemeral=True
         )
     
+    # Clockout of session status
     @app_commands.describe(note="Optional note to add to your activity log")
     async def clockout(self, interaction: discord.Interaction, note: str = None):
         if not await self._check_server(interaction):
@@ -577,11 +597,11 @@ class Commands:
         )
 
     
-
+    # Reset the weekly activity
     async def reset_weekly(self, interaction: discord.Interaction):
         if not await self._check_server(interaction):
             return
-        # Test the weekly reset function
+        
         try:
             await interaction.response.defer()
             await self.sheets_manager.reset_weekly_activity()
