@@ -52,49 +52,66 @@ class ActivityHandler:
 
     # Process approved activity log
     async def process_activity_approval(self, message):
-
-        # Is there already a rection
-        for reaction in message.reactions:
-            if str(reaction.emoji) == "✅":
-                async for user in reaction.users():
-                    if user.id == message.guild.get_member_named(message.author.name).bot.user.id:
-                        return
-
         try:
-            # Extract and validate time data 
             time_data = self.extract_time_data(message.content)
             if not time_data:
-                print("Error: Could not extract time data during approval")
                 return
             
             hours, mins = time_data
             user_name = message.channel.name
             
-            print(f"Processing approved activity for: {user_name}")
-
-            # Check if user is on LOA before updating activity checkbox
-            is_on_loa = self.sheets_manager.is_user_on_loa(user_name)
+            # ONE API call to get all user data
+            user_data = self.sheets_manager.batch_get_user_data(user_name)
+            if not user_data:
+                print(f"Error: Could not find {user_name} in spreadsheet")
+                return
+            
+            is_on_loa = user_data['loa_status'] == "LoA"
+            
+            # Prepare all updates
+            updates = []
             
             if not is_on_loa:
-                # Only update activity checkbox if user is NOT on LOA
-                if not self.sheets_manager.update_activity_checkbox(user_name):
-                    print(f"Error: Could not find {user_name} in spreadsheet")
-                    return
+                # Update activity checkbox
+                updates.append({
+                    'row': user_data['row_index'],
+                    'col': ACTIVITY_COLUMN + 1,
+                    'value': True
+                })
+            
+            if hours >= MIN_HOURS_FOR_POINTS:
+                points_to_award = hours * POINTS_PER_HOUR
+                new_total = user_data['points'] + points_to_award
+                
+                # Update points
+                updates.append({
+                    'row': user_data['row_index'],
+                    'col': POINTS_COLUMN + 1,
+                    'value': new_total
+                })
+                
+                # ONE API call for all updates
+                if updates:
+                    self.sheets_manager.batch_update_cells(updates)
+                
+                # Check promotion with data we already have
+                promo_check = self.check_promotion_eligibility_from_data(
+                    new_total, user_data['rank']
+                )
+                
+                # Send response
+                await self.send_approval_message(message, hours, mins, new_total, 
+                                                promo_check, is_on_loa)
             else:
-                return
-
-            # Handle awarding points
-            if hours < MIN_HOURS_FOR_POINTS:
-                # MAKE SURE THERE'S NO add_reaction HERE
-                loa_note = " (LOA - activity not counted but time logged)" if is_on_loa else ""
+                # Just update activity if needed
+                if updates:
+                    self.sheets_manager.batch_update_cells(updates)
+                
                 await message.reply(
-                    f"✅ Logged! Please note that this log does not meet the minimum requirement of 1 hour and will not be counted towards points.",
+                    f"✅ Logged! Please note that this log does not meet the minimum requirement of 1 hour.",
                     mention_author=False
                 )
-            else:
-                # MAKE SURE THERE'S NO add_reaction IN award_points EITHER
-                await self.award_points(message.author.id, hours, mins, user_name, message, is_on_loa)
-
+                
         except Exception as e:
             print(f"Error processing activity approval: {e}")
 

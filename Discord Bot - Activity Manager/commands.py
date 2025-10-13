@@ -130,6 +130,12 @@ class Commands:
             callback=self.clockout
         ))
 
+        self.bot.tree.add_command(app_commands.Command(
+            name="deploy",
+            description="Create a deployment announcement",
+            callback=self.deploy
+        ))
+
     def parse_timezone(self, timezone_str):
         # Handle every timezone
         if not timezone_str:
@@ -164,40 +170,31 @@ class Commands:
         return None
     
     async def update_status_board(self):
-        # Update the session status board
         channel = self.bot.get_channel(SESSION_STATUS_CHANNEL_ID)
         if not channel:
-            print("Session status channel not found")
             return
         
-        # Define rank hierarchy
         rank_hierarchy = {
-            "E9": 9,
-            "E8": 8,
-            "E7": 7,
-            "E6": 6,
-            "E5": 5,
-            "E4": 4,
-            "E3": 3,
-            "E2": 2,
-            "E1": 1
+            "E9": 9, "E8": 8, "E7": 7, "E6": 6,
+            "E5": 5, "E4": 4, "E3": 3, "E2": 2, "E1": 1
         }
         
-        # Collect all online users with their ranks
         online_data = []
         
+        # Batch get all user data at once instead of individual queries
+        usernames_to_fetch = [session.get("username") for session in self.active_log.values()]
+        
+        # Get all at once from cache
         for user_id, session in self.active_log.items():
             user = self.bot.get_user(user_id)
             if not user:
                 continue
             
-            # Get their rank from spreadsheet
             username = session.get("username")
-            rank = self.sheets_manager.get_user_rank(username)
+            user_data = self.sheets_manager.get_cached_user_data(username)
+            rank = user_data['rank'] if user_data else "E1"
             
-            # Get rank value
             rank_value = rank_hierarchy.get(rank, 0)
-            
             online_data.append({
                 "user": user,
                 "rank": rank,
@@ -228,156 +225,137 @@ class Commands:
         
         # Create or update message
         try:
-            messages = [msg async for msg in channel.history(limit=10)]
-            bot_messages = [msg for msg in messages if msg.author.id == self.bot.user.id]
-            
-            if bot_messages:
-                # Edit the most recent bot message
-                await bot_messages[0].edit(content=content)
+            # Only fetch if we don't have the message ID cached
+            if not self.status_board_message_id:
+                messages = [msg async for msg in channel.history(limit=5)]
+                bot_messages = [msg for msg in messages if msg.author.id == self.bot.user.id]
+                
+                if bot_messages:
+                    message = bot_messages[0]
+                    self.status_board_message_id = message.id
+                else:
+                    message = await channel.send(content, silent=True)
+                    self.status_board_message_id = message.id
+                    return
             else:
-                # No existing message, create a new one
-                await channel.send(content, silent=True)
+                # Use cached message ID
+                try:
+                    message = await channel.fetch_message(self.status_board_message_id)
+                except discord.NotFound:
+                    # Message was deleted, create new one
+                    message = await channel.send(content, silent=True)
+                    self.status_board_message_id = message.id
+                    return
+            
+            await message.edit(content=content)
+            
         except Exception as e:
             print(f"Error updating status board: {e}")
-            return
 
     # Display the activity points leaderboard with pages
     async def leaderboard(self, interaction: discord.Interaction):
-        
         if not await self._check_server(interaction):
             return
+        
         try:
-            # Get all data directly from spreadsheet
-            all_values = self.sheets_manager.worksheet.get_all_values()
+            # Use cached data - ONE API call
+            all_values = self.sheets_manager.get_all_users_cached()
             
             leaderboard_data = []
+            valid_statuses = ["Active", "Inactive", "LOA"]
             
-            # Find the actual end of usernames by looking for empty usernames
-            last_user_row = 0
-            for i, row in enumerate(all_values[3:], start=4): 
-                if len(row) > 1:
-                    username = row[1].strip() if row[1] else ""  
-                    if username:  # If there's a username, this is a valid user row
-                        last_user_row = i
-                    else:
-                        break  # Stop at first empty username
-            
-            # Extract usernames and points from spreadsheet 
-            for i, row in enumerate(all_values[3:last_user_row], start=4):
-                if len(row) > max(POINTS_COLUMN, STATUS_COLUMN, 1):
-                    username = row[1].strip() if len(row) > 1 and row[1] else ""  
-                    points = row[POINTS_COLUMN] if len(row) > POINTS_COLUMN else "0"
-                    discord_id = row[DISCORD_ID_COLUMN] if len(row) > DISCORD_ID_COLUMN and row[DISCORD_ID_COLUMN] else ""
-                    status = row[STATUS_COLUMN] if len(row) > STATUS_COLUMN else ""
+            # Process rows (keep rest of your logic)
+            for i, row in enumerate(all_values[3:], start=4):
+                if len(row) <= max(POINTS_COLUMN, STATUS_COLUMN, 1):
+                    continue
                     
-                    # Skip users who don't have an active status (likely hidden/former members)
-                    # Only include users with "Active", "Inactive", or "LOA" status (exclude empty status)
-                    valid_statuses = ["Active", "Inactive", "LOA"]
-                    
-                    # Include users with usernames AND valid status
-                    if username and any(status_val in str(status) for status_val in valid_statuses):
-                        point_value = int(points) if points.isdigit() else 0
-                        
-                        # Try to find Discord member to get their nickname (fallback to username if not found)
-                        display_name = username 
-                        
-                        if discord_id:
-                            # If we have Discord ID, try to get their server nickname
-                            try:
-                                member = interaction.guild.get_member(int(discord_id))
-                                if member:
-                                    display_name = member.nick if member.nick else member.display_name
-                            except:
-                                pass
-                        else:
-                            # If no Discord ID, try to find member by username extraction
-                            for member in interaction.guild.members:
-                                # Extract username from Discord display name
-                                import re
-                                extracted = re.sub(r'^(\[.*?\]|\(.*?\)|[A-Z]+\d*\s*-\s*)', '', member.display_name).strip()
-                                if extracted.lower() == username.lower():
-                                    display_name = member.nick if member.nick else member.display_name
-                                    break
-                        
-                        leaderboard_data.append((display_name, point_value))
+                username = row[1].strip() if len(row) > 1 and row[1] else ""
+                status = row[STATUS_COLUMN] if len(row) > STATUS_COLUMN else ""
+                
+                if not username or not any(s in str(status) for s in valid_statuses):
+                    if username:  # Have username but no status means end of active users
+                        break
+                    continue
+                
+                points = row[POINTS_COLUMN] if len(row) > POINTS_COLUMN else "0"
+                point_value = int(points) if points.isdigit() else 0
+                
+                discord_id = row[DISCORD_ID_COLUMN] if len(row) > DISCORD_ID_COLUMN else ""
+                display_name = username
+                
+                # Only lookup Discord member if we have ID (reduce lookups)
+                if discord_id:
+                    try:
+                        member = interaction.guild.get_member(int(discord_id))
+                        if member:
+                            display_name = member.nick or member.display_name
+                    except:
+                        pass
+                
+                leaderboard_data.append((display_name, point_value))
             
             if not leaderboard_data:
                 embed = discord.Embed(
                     title="Leaderboard",
-                    description="No users found in the spreadsheet.",
-                    color=0x3498db,
-                    timestamp=datetime.now(tz.utc)
+                    description="No users found.",
+                    color=0x3498db
                 )
-                embed.set_footer(text="Page 1/1")
                 await interaction.response.send_message(embed=embed)
                 return
             
-            # Sort by points descending, then by name ascending for ties
+            # Sort and create view
             sorted_users = sorted(leaderboard_data, key=lambda x: (-x[1], x[0].lower()))
-            
-            # Create paged leaderboard view
             view = LeaderboardView(sorted_users, interaction)
             embed = view.get_embed()
-            
-            await interaction.response.send_message(embed=embed, view=view)
-            
         except Exception as e:
-            await interaction.response.send_message(f"⚠ **Error:** Could not generate leaderboard. {e}")
+            await interaction.response.send_message(f"⚠️ Error: {e}", ephemeral=True)
 
     # Check points for a specific user
     @app_commands.describe(user="Member to check points for (optional)")
     async def points(self, interaction: discord.Interaction, user: discord.Member = None):
         if not await self._check_server(interaction):
             return
-       
+    
         try:
+            target_user = user or interaction.user
+            discord_id = str(target_user.id)
+            
+            # Use cache instead of multiple API calls
+            username = self.sheets_manager.get_username_by_discord_id(discord_id)
+            
+            if not username:
+                await interaction.response.send_message(
+                    f"❌ Error: Could not find user in roster.",
+                    ephemeral=True
+                )
+                return
+            
+            # Get cached data
+            user_data = self.sheets_manager.get_cached_user_data(username)
+            
+            if not user_data:
+                await interaction.response.send_message(
+                    f"❌ Error: Could not find data for {username}.",
+                    ephemeral=True
+                )
+                return
+            
+            points = user_data['points']
+            
             if user:
-                # User is a Discord Member object, get their ID
-                discord_id = str(user.id)
-                username = self.sheets_manager.get_username_by_discord_id(discord_id)
-                
-                if not username:
-                    await interaction.response.send_message(
-                        f"❌ **Error:** Could not find Discord ID for {user.mention} in the roster spreadsheet."
-                    )
-                    return
-                
-                # Now look up the points for the username
-                try:
-                    cell = self.sheets_manager.worksheet.find(username)
-                    row_index = cell.row
-                    
-                    # Get current points from spreadsheet
-                    current_points_cell = self.sheets_manager.worksheet.cell(row_index, POINTS_COLUMN + 1)
-                    points = int(current_points_cell.value) if current_points_cell.value and str(current_points_cell.value).isdigit() else 0
-                    
-                    await interaction.response.send_message(f"**{username}** has **{points} points**")
-                    
-                except Exception as find_error:
-                    await interaction.response.send_message(f"❌ **Error:** Could not find username '{username}' in the roster spreadsheet.")
+                await interaction.response.send_message(
+                    f"**{username}** has **{points} points**"
+                )
             else:
-                # Show current user's points by Discord ID lookup
-                user_id = str(interaction.user.id)
-                username = self.sheets_manager.get_username_by_discord_id(user_id)
+                await interaction.response.send_message(
+                    f"You have **{points} points**"
+                )
                 
-                if username:
-                    try:
-                        cell = self.sheets_manager.worksheet.find(username)
-                        row_index = cell.row
-                        
-                        # Get current points from spreadsheet
-                        current_points_cell = self.sheets_manager.worksheet.cell(row_index, POINTS_COLUMN + 1)
-                        points = int(current_points_cell.value) if current_points_cell.value and str(current_points_cell.value).isdigit() else 0
-                        
-                        await interaction.response.send_message(f"You have **{points} points**")
-                        
-                    except Exception as find_error:
-                        await interaction.response.send_message(f"❌ **Error:** Could not find your username '{username}' in the roster spreadsheet.")
-                else:
-                    await interaction.response.send_message("❌ **Error:** Could not find your Discord ID in the roster spreadsheet.")
-                    
         except Exception as e:
-            await interaction.response.send_message(f"❌ **Error:** Could not check points. {e}")
+            await interaction.response.send_message(
+                f"❌ Error: {e}",
+                ephemeral=True
+            )
 
     # Manually add points to a user
     @app_commands.describe(amount="Number of points to add", member="Member to add points to")
@@ -516,8 +494,9 @@ class Commands:
         if not await self._check_server(interaction):
             return
         
+
         if not timezone:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 "⚠️ Timezone is required! Please use: `/clockin timezone:EST` (or PST, GMT, etc.)",
                 ephemeral=True
             )
@@ -590,11 +569,45 @@ class Commands:
         
         # Send confirmation and request for proof
         await interaction.response.send_message(
-            f"✅ **Clocked Out!**\n\n"
+            f"You are now **Offline!**\n\n"
             f"Please send your proof image in your activity thread.\n"
             f"The log will be automatically posted after you send the image.\n",
             ephemeral=True
         )
+
+    @app_commands.describe(note="What the deployment is about")
+    async def deploy(self, interaction: discord.Interaction, note: str):
+        if not await self._check_server(interaction):
+            return
+        
+        # Defer immediately to prevent timeout
+        await interaction.response.defer(ephemeral=True)
+
+        try:
+            channel = self.bot.get_channel(DEPLOYMENT_ID)
+
+            # Create the deployment message
+            deployment_message = (
+                f"<@&1427224435445858334>\n\n"
+                f"{note}\n\n"
+                f"**Commander**\n{interaction.user.mention}\n\n"
+                f"**Operatives**\n"
+                f"None"
+                f"\n\nReact to join the deployment!"
+            )
+            
+            # Send the deployment announcement
+            message = await channel.send(
+                deployment_message,
+                allowed_mentions=discord.AllowedMentions(roles=True)
+            )
+
+            await message.add_reaction("✅")
+
+            await interaction.response.send_message("✅ Deployment created!", ephemeral=True)
+            
+        except Exception as e:
+            await interaction.followup.send(f"❌ **Error:** Could not create deployment. {e}", ephemeral=True)
 
     
     # Reset the weekly activity

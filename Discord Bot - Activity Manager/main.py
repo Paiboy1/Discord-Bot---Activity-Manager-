@@ -218,6 +218,18 @@ async def on_raw_reaction_add(payload):
     if payload.guild_id != SERVER_ID:
         return
     
+    # Handle deployment reactions
+    if payload.channel_id == DEPLOYMENT_ID and str(payload.emoji) == "✅":
+        try:
+            channel = bot.get_channel(payload.channel_id)
+            message = await channel.fetch_message(payload.message_id)
+            
+            # Check if this is a deployment message (contains "Commander" and "Operatives")
+            if "**Commander**" in message.content and "**Operatives**" in message.content:
+                await update_deployment_board(message, payload.user_id)
+        except Exception as e:
+            print(f"Error processing deployment reaction: {e}")
+
     # Get the channel and check if it's LOA channel
     if payload.channel_id == LOA_CHANNEL_ID and str(payload.emoji) == "✅":
         try:
@@ -281,6 +293,52 @@ async def find_username_in_title(title, usernames):
         if user.lower() in title.lower():
             return user
     return None
+
+async def update_deployment_board(message, user_id):
+    # Deployment board when users react
+    try:
+        # Get the user who reacted
+        user = bot.get_user(user_id)
+        if not user:
+            return
+        
+        # Check if user is already mentioned in the message
+        if user.mention in message.content:
+            return 
+        
+        lines = message.content.split('\n')
+        
+        # Find the "**Operatives**" line and "React to join" line
+        operatives_idx = None
+        react_line_idx = None
+        
+        for i, line in enumerate(lines):
+            if line.strip() == "**Operatives**":
+                operatives_idx = i
+            if "React with" in line or "React to join" in line:
+                react_line_idx = i
+                break
+        
+        if operatives_idx is None or react_line_idx is None:
+            return
+        
+        # Check if "None" exists right after **Operatives**
+        # If so, replace it. Otherwise, insert before "React to join"
+        if operatives_idx + 1 < len(lines) and lines[operatives_idx + 1].strip() == "None":
+            lines[operatives_idx + 1] = user.mention
+        else:
+            lines.insert(react_line_idx, user.mention)
+        
+        new_content = '\n'.join(lines)
+        
+        # Update the message
+        await message.edit(
+            content=new_content, 
+            allowed_mentions=discord.AllowedMentions(roles=True, users=False)
+        )
+        
+    except Exception as e:
+        print(f"Error updating deployment board: {e}")
 
 if __name__ == "__main__":
     bot.run(DISCORD_TOKEN)

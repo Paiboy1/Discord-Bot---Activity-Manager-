@@ -1,6 +1,7 @@
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 from config import *
+from datetime import datetime, timedelta
 
 class SheetsManager:
     def __init__(self):
@@ -8,6 +9,10 @@ class SheetsManager:
         self.spreadsheet = None
         self.worksheet = None
         self.connect()
+        self.user_cache = {}
+        self.cache_duration = timedelta(minutes=5)
+        self.last_full_load = None
+        self.all_users_cache = []
     
     def connect(self):
         # Connect to Google Sheets using service account credentials
@@ -21,6 +26,80 @@ class SheetsManager:
         except Exception as e:
             print(f"Error connecting to Google Sheets: {e}")
             raise e
+    
+    def get_cached_user_data(self, username):
+        # Get user data from cache or fetch
+        cache_key = username.lower()
+        
+        if cache_key in self.user_cache:
+            cached_data, timestamp = self.user_cache[cache_key]
+            if datetime.now() - timestamp < self.cache_duration:
+                return cached_data
+        
+        # Cache miss or stale - fetch from sheets
+        user_data = self.batch_get_user_data(username)
+        if user_data:
+            self.user_cache[cache_key] = (user_data, datetime.now())
+        return user_data
+
+    def invalidate_user_cache(self, username):
+        # Clear cache for specific user after updates
+        cache_key = username.lower()
+        if cache_key in self.user_cache:
+            del self.user_cache[cache_key]
+    
+    def get_all_users_cached(self):
+        # Cache the entire roster for leaderboard
+        now = datetime.now()
+        
+        if self.last_full_load and (now - self.last_full_load < self.cache_duration):
+            return self.all_users_cache
+        
+        # Refresh cache
+        all_values = self.worksheet.get_all_values()
+        self.all_users_cache = all_values
+        self.last_full_load = now
+        return all_values
+    
+    def batch_get_user_data(self, username):
+        # Get all user data in one API call
+        try:
+            cell = self.worksheet.find(username)
+            row_index = cell.row
+            
+            # Get entire row in ONE API call instead of multiple
+            row_data = self.worksheet.row_values(row_index)
+            
+            return {
+                'row_index': row_index,
+                'points': int(row_data[POINTS_COLUMN]) if len(row_data) > POINTS_COLUMN and row_data[POINTS_COLUMN].isdigit() else 0,
+                'rank': row_data[RANK_COLUMN-1] if len(row_data) > RANK_COLUMN-1 else "",
+                'status': row_data[STATUS_COLUMN] if len(row_data) > STATUS_COLUMN else "",
+                'loa_status': row_data[LOA_NOTICE_COLUMN] if len(row_data) > LOA_NOTICE_COLUMN else "",
+                'activity_checked': row_data[ACTIVITY_COLUMN] if len(row_data) > ACTIVITY_COLUMN else False
+            }
+        except Exception as e:
+            print(f"Error getting user data: {e}")
+            return None
+    
+    def batch_update_cells(self, updates):
+        # Update multiple cells in one API call updates: list of dicts with 'row', 'col', 'value'
+        try:
+            # Build batch update request
+            batch_data = []
+            for update in updates:
+                cell_range = f"{chr(64 + update['col'])}{update['row']}"
+                batch_data.append({
+                    'range': cell_range,
+                    'values': [[update['value']]]
+                })
+            
+            # Single API call for all updates
+            self.worksheet.batch_update(batch_data, value_input_option='USER_ENTERED')
+            return True
+        except Exception as e:
+            print(f"Error in batch update: {e}")
+            return False
         
     def load_timezones_from_txt(self):
         timezones = {}
@@ -359,42 +438,25 @@ class SheetsManager:
             print(f"Error updating activity checkbox for {username}: {e}")
             return False
     
-    def check_promotion_eligibility(self, username):
-        # Check if user is eligible for promotion based on points and current rank
-        try:
-            cell = self.worksheet.find(username)
-            row_index = cell.row
-            
-            # Get current points and rank
-            points_cell = self.worksheet.cell(row_index, POINTS_COLUMN + 1)
-            points = int(points_cell.value) if points_cell.value and str(points_cell.value).isdigit() else 0
-            
-            rank_cell = self.worksheet.cell(row_index, RANK_COLUMN) 
-            current_rank = rank_cell.value if rank_cell.value else ""
-            
-            # Define promotion requirements
-            promotions = {
-                "E1": {"next_rank": "E2", "points_needed": 10, "needs_app": False},
-                "E2": {"next_rank": "E3", "points_needed": 30, "needs_app": False},
-                "E3": {"next_rank": "E4", "points_needed": 50, "needs_app": True},    # Needs MR Ascension for E5
-                "E4": {"next_rank": "E5", "points_needed": 70, "needs_app": False},  
-            }
-            
-            if current_rank in promotions:
-                promo_info = promotions[current_rank]
-                
-                if points >= promo_info["points_needed"]:
-                    return {
-                        "eligible": True,
-                        "next_rank": promo_info["next_rank"],
-                        "needs_application": promo_info["needs_app"]
-                    }
-            
-            return {"eligible": False}
-            
-        except Exception as e:
-            print(f"Error checking promotion eligibility for {username}: {e}")
-            return {"eligible": False}
+    def check_promotion_eligibility_from_data(self, points, current_rank):
+        # Check promotion without additional API calls
+        promotions = {
+            "E1": {"next_rank": "E2", "points_needed": 10, "needs_app": False},
+            "E2": {"next_rank": "E3", "points_needed": 30, "needs_app": False},
+            "E3": {"next_rank": "E4", "points_needed": 50, "needs_app": True},
+            "E4": {"next_rank": "E5", "points_needed": 70, "needs_app": False},
+        }
+        
+        if current_rank in promotions:
+            promo_info = promotions[current_rank]
+            if points >= promo_info["points_needed"]:
+                return {
+                    "eligible": True,
+                    "next_rank": promo_info["next_rank"],
+                    "needs_application": promo_info["needs_app"]
+                }
+        
+        return {"eligible": False}
     
     def get_user_rank(self, username):
         # Get user's rank from spreadsheet
