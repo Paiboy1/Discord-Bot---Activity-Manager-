@@ -4,6 +4,7 @@ import discord
 from discord import app_commands
 from datetime import datetime, timezone as tz, timedelta
 from config import *
+import asyncio
 import re
 
 class LeaderboardView(discord.ui.View):
@@ -63,13 +64,15 @@ class LeaderboardView(discord.ui.View):
             await interaction.response.defer()
 
 class Commands:
-    def __init__(self, bot, sheets_manager, user_points, active_log, pending_proof):
+    def __init__(self, bot, sheets_manager, user_points, active_log, pending_proof, timezone_offsets=None, role_manager=None):
         self.bot = bot
         self.sheets_manager = sheets_manager
         self.user_points = user_points
         self.active_log = active_log
         self.pending_proof = pending_proof
         self.status_board_message_id = None
+        self.timezone_offsets = timezone_offsets or {}
+        self.role_manager = role_manager
 
     async def _check_server(self, interaction: discord.Interaction) -> bool:
         if interaction.guild_id != SERVER_ID:
@@ -125,6 +128,12 @@ class Commands:
         ))
 
         self.bot.tree.add_command(app_commands.Command(
+            name="time", 
+            description="Check how long you've been clocked in",
+            callback=self.check_time
+        ))
+
+        self.bot.tree.add_command(app_commands.Command(
             name="clockout",
             description="Clock out to stop log timer",
             callback=self.clockout
@@ -137,30 +146,18 @@ class Commands:
         ))
 
     def parse_timezone(self, timezone_str):
-        # Handle every timezone
+        # Handle every timezone using the loaded Timezones.txt file
         if not timezone_str:
             return None
         
-        timezone_str = timezone_str.upper().strip()
+        # Remove all spaces and convert to uppercase
+        timezone_str = timezone_str.replace(" ", "").upper().strip()
         
-        # Named timezones
-        named_timezones = {
-            "EST": -5, "EDT": -4,
-            "PST": -8, "PDT": -7,
-            "GMT": 0, "UTC": 0,
-            "BST": 1,
-            "CST": -6, "CDT": -5,
-            "MST": -7, "MDT": -6,
-            "IST": 5.5,  
-            "JST": 9,    
-            "AEST": 10, 
-            "CET": 2,  
-        }
+        # First check the loaded timezone offsets from Timezones.txt
+        if timezone_str in self.timezone_offsets:
+            return self.timezone_offsets[timezone_str]
         
-        if timezone_str in named_timezones:
-            return named_timezones[timezone_str]
-        
-        # Handle GMT+X or UTC+X format
+        # Handle GMT+X or UTC+X format (for custom offsets)
         match = re.match(r'(GMT|UTC)([+-])(\d+(?:\.\d+)?)', timezone_str)
         if match:
             sign = 1 if match.group(2) == '+' else -1
@@ -264,18 +261,27 @@ class Commands:
             leaderboard_data = []
             valid_statuses = ["Active", "Inactive", "LOA"]
             
-            # Process rows (keep rest of your logic)
+            # Process rows
             for i, row in enumerate(all_values[3:], start=4):
                 if len(row) <= max(POINTS_COLUMN, STATUS_COLUMN, 1):
                     continue
                     
                 username = row[1].strip() if len(row) > 1 and row[1] else ""
-                status = row[STATUS_COLUMN] if len(row) > STATUS_COLUMN else ""
                 
-                if not username or not any(s in str(status) for s in valid_statuses):
-                    if username:  # Have username but no status means end of active users
-                        break
+                # Skip empty usernames
+                if not username:
                     continue
+                
+                status = row[STATUS_COLUMN] if len(row) > STATUS_COLUMN else ""
+                status = status.strip()  # Remove whitespace
+                
+                # If status is completely blank/empty, we've reached the end
+                if status == "":
+                    break 
+                
+                # If status is "N/A" or "REMOVED" or anything invalid, skip but continue
+                if not any(s in status for s in valid_statuses):
+                    continue  
                 
                 points = row[POINTS_COLUMN] if len(row) > POINTS_COLUMN else "0"
                 point_value = int(points) if points.isdigit() else 0
@@ -283,7 +289,7 @@ class Commands:
                 discord_id = row[DISCORD_ID_COLUMN] if len(row) > DISCORD_ID_COLUMN else ""
                 display_name = username
                 
-                # Only lookup Discord member if we have ID (reduce lookups)
+                # Only lookup Discord member if we have ID
                 if discord_id:
                     try:
                         member = interaction.guild.get_member(int(discord_id))
@@ -293,6 +299,8 @@ class Commands:
                         pass
                 
                 leaderboard_data.append((display_name, point_value))
+            
+            print(f"DEBUG: Found {len(leaderboard_data)} users for leaderboard")
             
             if not leaderboard_data:
                 embed = discord.Embed(
@@ -307,7 +315,11 @@ class Commands:
             sorted_users = sorted(leaderboard_data, key=lambda x: (-x[1], x[0].lower()))
             view = LeaderboardView(sorted_users, interaction)
             embed = view.get_embed()
+            
+            await interaction.response.send_message(embed=embed, view=view)
+            
         except Exception as e:
+            print(f"Leaderboard error: {e}")
             await interaction.response.send_message(f"⚠️ Error: {e}", ephemeral=True)
 
     # Check points for a specific user
@@ -363,41 +375,81 @@ class Commands:
         if not await self._check_server(interaction):
             return
         
+        # Defer the response since this might take a while
+        await interaction.response.defer()
+        
         try:
-            # Extract username from Discord member's display name
-            import re
-            username = str(member.id)
+            # Get Discord ID
+            discord_id = str(member.id)
+            print(f"[DEBUG /add] Looking up Discord ID: {discord_id}")
             
-            # Get current points from spreadsheet
-            try:
-                cell = self.sheets_manager.worksheet.find(username)
-                row_index = cell.row
-                
-                # Get current points
-                current_points_cell = self.sheets_manager.worksheet.cell(row_index, POINTS_COLUMN + 1)
-                current_points = int(current_points_cell.value) if current_points_cell.value and str(current_points_cell.value).isdigit() else 0
-                
-                # Add new points to current total
-                new_total = current_points + amount
-                
-                # Save new total to spreadsheet
-                self.sheets_manager.worksheet.update_cell(row_index, POINTS_COLUMN + 1, new_total)
-                
-                await interaction.response.send_message(
-                    f"✅ **Points Added!**\n"
-                    f"• Added **{amount} points** to **{member.display_name}** ({username})\n"
-                    f"• Previous total: **{current_points} points**\n"
-                    f"• New total: **{new_total} points**"
+            # Search spreadsheet by Discord ID to get username
+            username = self.sheets_manager.get_username_by_discord_id(discord_id)
+            
+            if not username:
+                await interaction.followup.send(
+                    f"❌ **Error:** Could not find {member.display_name} in the roster. "
+                    f"Make sure their Discord ID ({discord_id}) is in Column Q of the spreadsheet.",
+                    ephemeral=True
                 )
-                
-            except Exception as find_error:
-                await interaction.response.send_message(
-                    f"❌ **Error:** Could not find username '{username}' in the roster spreadsheet. "
-                    f"Make sure {member.display_name}'s Roblox username is in the roster."
+                return
+            
+            print(f"[DEBUG /add] Found username: {username} for Discord ID: {discord_id}")
+            
+            # Get user data using the username
+            user_data = self.sheets_manager.batch_get_user_data(username)
+            if not user_data:
+                await interaction.followup.send(
+                    f"❌ **Error:** Could not find data for {username}",
+                    ephemeral=True
                 )
-
+                return
+            
+            current_points = user_data['points']
+            current_rank = user_data['rank']
+            
+            # Add new points to current total
+            new_total = current_points + amount
+            
+            # Save new total to spreadsheet
+            self.sheets_manager.update_points(username, new_total)
+            
+            print(f"[DEBUG /add] Current rank: {current_rank}, Points: {current_points} -> {new_total}")
+            
+            # Check promotion eligibility
+            promo_check = self.sheets_manager.check_promotion_eligibility_from_data(
+                new_total, current_rank
+            )
+            print(f"[DEBUG /add] Promo check: {promo_check}")
+            print(f"[DEBUG /add] Role manager exists: {self.role_manager is not None}")
+            
+            # Auto-promote if eligible and doesn't need application
+            promo_message = ""
+            if promo_check["eligible"] and not promo_check.get("needs_application", False) and self.role_manager:
+                print(f"[DEBUG /add] Attempting auto-rank: {member.display_name} from {current_rank} to {promo_check['next_rank']}")
+                result = await self.role_manager.auto_rank(member, promo_check['next_rank'])
+                print(f"[DEBUG /add] Auto-rank result: {result}")
+                
+                if result:
+                    promo_message = f"\n• **🏆 PROMOTED:** {member.display_name} has been promoted to **{promo_check['next_rank']}**!"
+                else:
+                    promo_message = f"\n• **⚠️ Promotion failed** - check console logs"
+            elif promo_check["eligible"] and promo_check.get("needs_application", False):
+                promo_message = f"\n• **🎖️ Promotion Available:** Eligible for **{promo_check['next_rank']}**\n• Please complete the MR Ascension form: {MR_ASCENSION_FORM_URL}"
+            
+            await interaction.followup.send(
+                f"✅ **Points Added!**\n"
+                f"• Added **{amount} points** to **{member.display_name}** ({username})\n"
+                f"• Previous total: **{current_points} points**\n"
+                f"• New total: **{new_total} points**"
+                f"{promo_message}"
+            )
+                
         except Exception as e:
-            await interaction.response.send_message(f"❌ **Error:** Could not add points. {e}")
+            print(f"[ERROR /add] {e}")
+            import traceback
+            traceback.print_exc()
+            await interaction.followup.send(f"❌ **Error:** Could not add points. {e}", ephemeral=True)
     
     # Manually remove points from a user
     @app_commands.describe(amount="Number of points to remove", member="Member to remove points from")
@@ -496,8 +548,17 @@ class Commands:
         
 
         if not timezone:
-            await interaction.followup.send(
+            await interaction.response.send_message(
                 "⚠️ Timezone is required! Please use: `/clockin timezone:EST` (or PST, GMT, etc.)",
+                ephemeral=True
+            )
+            return
+        
+        # validate timezones
+        offset_hours = self.parse_timezone(timezone.upper())
+        if offset_hours is None:
+            await interaction.response.send_message(
+                f"❌ **Invalid timezone: `{timezone}` Ask foxhole if your timezone is in the list**\n\n",
                 ephemeral=True
             )
             return
@@ -515,6 +576,12 @@ class Commands:
             )
             return
         
+        tz_msg = f" ({timezone.upper()})" if timezone else ""
+        await interaction.response.send_message(
+            f"✅ You are now **Online!** Timer started{tz_msg}",
+            ephemeral=True
+        )
+
         # Start tracking
         self.active_log[user_id] = {
             "start_time": datetime.now(tz.utc),
@@ -522,15 +589,11 @@ class Commands:
             "username": username
         }
 
+        print(f"[CLOCKIN] User {user_id} clocked in with timezone: {timezone.upper()}")
+
         # Updates session board
         await self.update_status_board()
         
-        tz_msg = f" ({timezone})" if timezone else ""
-        await interaction.response.send_message(
-            f"You are now **Online!** Timer started{tz_msg}",
-            ephemeral=True
-        )
-    
     # Clockout of session status
     @app_commands.describe(note="Optional note to add to your activity log")
     async def clockout(self, interaction: discord.Interaction, note: str = None):
@@ -549,32 +612,81 @@ class Commands:
         
         session_data = self.active_log.pop(user_id)
         session_data["end_time"] = datetime.now(tz.utc)
-
-        await self.update_status_board()
         
-        # Calculate total time
+        # Calculate total time BEFORE adding to pending_proof (prevents race condition)
         total_time_delta = session_data["end_time"] - session_data["start_time"]
         session_data["total_time"] = total_time_delta
 
         if note:
             session_data["note"] = note
 
-        # Move session data to pending_proof
+        await interaction.response.send_message(
+            "✅ You are now **Offline!**\n\n"
+            "Please send your proof image in your activity thread.\n"
+            "The log will be automatically posted after you send the image.\n\n"
+            "If you don't send proof within **5 minutes**, your session will be cancelled.",
+            ephemeral=True
+        )
+
+        # Start 5-minute timer
+        asyncio.create_task(self._proof_timeout_handler(user_id, interaction.user))
+        
+        # Move session data to pending_proof (ALL data must be ready before this!)
         self.pending_proof[user_id] = session_data
+        print(f"[CLOCKOUT] User {user_id} added to pending_proof. Current pending: {list(self.pending_proof.keys())}")
+
+        await self.update_status_board()
         
         # Calculate time components for display
         total_seconds = int(total_time_delta.total_seconds())
         hours = total_seconds // 3600
         minutes = (total_seconds % 3600) // 60
+    
+    async def _proof_timeout_handler(self, user_id, user):
+        # Handle timeout if user doesn't send proof within 5 minutes
+        await asyncio.sleep(300) 
         
-        # Send confirmation and request for proof
-        await interaction.response.send_message(
-            f"You are now **Offline!**\n\n"
-            f"Please send your proof image in your activity thread.\n"
-            f"The log will be automatically posted after you send the image.\n",
-            ephemeral=True
-        )
+        # Check if they're still in pending_proof (they didn't send image)
+        if user_id in self.pending_proof:
+            session_data = self.pending_proof.pop(user_id)
+            
+            total_seconds = int(session_data["total_time"].total_seconds())
+            hours = total_seconds // 3600
+            minutes = (total_seconds % 3600) // 60
+            
+            print(f"[TIMEOUT] User {user_id} ({user.name}) failed to send proof within 5 minutes. Session cancelled: {hours}h {minutes}m")
 
+    # Check current session time
+    async def check_time(self, interaction: discord.Interaction):
+        if not await self._check_server(interaction):
+            return
+        
+        user_id = interaction.user.id
+        
+        # Check if user is clocked in
+        if user_id not in self.active_log:
+            await interaction.response.send_message(
+                "⚠️ You are not currently clocked in.",
+                ephemeral=True
+            )
+            return
+        
+        session_data = self.active_log[user_id]
+        start_time = session_data["start_time"]
+        current_time = datetime.now(tz.utc)
+        
+        # Calculate elapsed time
+        elapsed = current_time - start_time
+        total_seconds = int(elapsed.total_seconds())
+        hours = total_seconds // 3600
+        minutes = (total_seconds % 3600) // 60
+        
+        # Build simple response
+        response = f"You have been clocked in for: **{hours} hours {minutes} mins**"
+        
+        await interaction.response.send_message(response, ephemeral=True)
+
+    # Deployment command to start 
     @app_commands.describe(note="What the deployment is about")
     async def deploy(self, interaction: discord.Interaction, note: str):
         if not await self._check_server(interaction):
@@ -588,12 +700,15 @@ class Commands:
 
             # Create the deployment message
             deployment_message = (
-                f"<@&1427224435445858334>\n\n"
+                f"<@&1332029491463065670>\n"
+                f"# 🚨 SESSION DEPLOYMENT 🚨"
+                f"\n\n"
                 f"{note}\n\n"
                 f"**Commander**\n{interaction.user.mention}\n\n"
                 f"**Operatives**\n"
                 f"None"
-                f"\n\nReact to join the deployment!"
+                f"\n\n"
+                f"React to join the deployment and earn points!"
             )
             
             # Send the deployment announcement
@@ -604,7 +719,7 @@ class Commands:
 
             await message.add_reaction("✅")
 
-            await interaction.response.send_message("✅ Deployment created!", ephemeral=True)
+            await interaction.edit_original_response(content="✅ Deployment created!")
             
         except Exception as e:
             await interaction.followup.send(f"❌ **Error:** Could not create deployment. {e}", ephemeral=True)

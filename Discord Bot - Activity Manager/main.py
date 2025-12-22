@@ -8,6 +8,7 @@ from sheets_manager import SheetsManager
 from commands import Commands
 from activity_handler import ActivityHandler
 from loa_handler import LOAHandler
+from auto_nickrole import RoleManager
 
 # Initialize components
 sheets_manager = SheetsManager()
@@ -25,10 +26,11 @@ intents.guilds = True
 intents.members = True
 intents.messages = True
 bot = commands.Bot(command_prefix='!', intents=intents)
+role_manager = RoleManager(bot, sheets_manager)
 
 # Initialize handlers
-activity_handler = ActivityHandler(sheets_manager, user_points)
-commands_handler = Commands(bot, sheets_manager, user_points, active_log, pending_proof)
+activity_handler = ActivityHandler(sheets_manager, user_points, role_manager)
+commands_handler = Commands(bot, sheets_manager, user_points, active_log, pending_proof, timezone_offsets, role_manager)
 loa_handler = LOAHandler(sheets_manager)
 
 def get_squadron_from_roles(member):
@@ -102,6 +104,7 @@ async def on_thread_create(thread):
             "3. **Post Proof:** After clocking out, submit your **proof image** here in this thread. The bot will automatically post your formatted log.\n\n"
             
             "**⚠️ Important Log Rules:**\n"
+            "• You can use **/time** to check how long you have played before clocking out (Helpful if trying to play exactly for 1 hour ect.\n)"
             "• You must have at least **1 hour** in your log to earn points.\n"
             "• Don't try log in any other way, it will NOT be accepted otherwise"
         )
@@ -119,71 +122,131 @@ async def on_message(message):
     # Handles image proofs for activity logs
     if  (hasattr(message.channel, 'parent_id') and 
         message.channel.parent_id == FORUM_CHANNEL_ID and
-        message.author.id in pending_proof and
         message.attachments):
-            
-        session_data = pending_proof.pop(message.author.id)
-            
-        # Format the times with timezone
-        tz_str = session_data.get("timezone", "UTC")
-        start_time = session_data["start_time"]
-        end_time = session_data["end_time"]
-
-        # Makes sure it appears as the correct timezone    
-        user_tz_str = session_data.get("timezone")
-        offset_hours = commands_handler.parse_timezone(user_tz_str)
-
-        if offset_hours is not None:
-            from datetime import timedelta, timezone as tz
-            user_offset = tz(timedelta(hours=offset_hours))
-            
-            # Convert times to user's timezone
-            start_local = start_time.replace(tzinfo=tz.utc).astimezone(user_offset)
-            end_local = end_time.replace(tzinfo=tz.utc).astimezone(user_offset)
-            
-            # Format with timezone
-            start_time_str = start_local.strftime("%H:%M")
-            end_time_str = end_local.strftime("%H:%M")
-        else:
+        
+        # Debug logging
+        print(f"[DEBUG] Image received from {message.author.name}")
+        print(f"[DEBUG] Pending proof users: {list(pending_proof.keys())}")
+        
+        if message.author.id not in pending_proof:
+            print(f"[DEBUG] User {message.author.id} not in pending_proof - ignoring image")
+            return
+        
+        try:
+            session_data = pending_proof.pop(message.author.id)
+            print(f"[DEBUG] Processing proof for {message.author.name}")
+        except KeyError:
+            print(f"[DEBUG ERROR] User {message.author.id} was in pending_proof but pop()")
+            await message.reply(
+                "⚠️ **Error:** Could not find your clock-out session.\n",
+                mention_author=False
+            )
+            return
+        except Exception as e:
+            print(f"[PROOF ERROR] Unexpected error getting session data: {e}")
+            await message.reply(
+                "❌ **Error:** Something went wrong retrieving your session data.\n",
+                mention_author=False
+            )
             return
             
-        # Calculate hours and minutes
-        total_seconds = int(session_data["total_time"].total_seconds())
-        hours = total_seconds // 3600
-        minutes = (total_seconds % 3600) // 60
-            
-        log_message = (
-            f"**New Activity Log Detected!**\n"
-            f"\n"
-            f"**Start time:** {start_time_str} ({tz_str})\n"
-            f"**End time:** {end_time_str} ({tz_str})\n"
-            f"**Total time:** {hours} hours {minutes} mins\n"
-            f"**Proof:**"
-        )
+        try:
+            # Format the times with timezone
+            tz_str = session_data.get("timezone", "UTC")
+            start_time = session_data["start_time"]
+            end_time = session_data["end_time"]
 
-        if "note" in session_data and session_data["note"]:
-            log_message += f"\n**Note:** {session_data['note']}"
+            # Makes sure it appears as the correct timezone    
+            user_tz_str = session_data.get("timezone")
+            offset_hours = commands_handler.parse_timezone(user_tz_str)
 
-        files_to_send = []
-        for attachment in message.attachments:
+            if offset_hours is not None:
+                from datetime import timedelta, timezone as tz
+                user_offset = tz(timedelta(hours=offset_hours))
+                
+                # Convert times to user's timezone
+                start_local = start_time.replace(tzinfo=tz.utc).astimezone(user_offset)
+                end_local = end_time.replace(tzinfo=tz.utc).astimezone(user_offset)
+                
+                # Format with timezone
+                start_time_str = start_local.strftime("%H:%M")
+                end_time_str = end_local.strftime("%H:%M")
+            else:
+                print(f"[PROOF ERROR] Could not parse timezone: {user_tz_str}")
+                await message.reply(
+                    "❌ **Error:** Invalid timezone in your session.\n"
+                    "Please tell foxhole",
+                    mention_author=False
+                )
+                return
+                
+            # Calculate hours and minutes
+            total_seconds = int(session_data["total_time"].total_seconds())
+            hours = total_seconds // 3600
+            minutes = (total_seconds % 3600) // 60
+                
+            log_message = (
+                f"**New Activity Log Detected!**\n\n"
+                f"**Start time:** {start_time_str} ({tz_str})\n"
+                f"**End time:** {end_time_str} ({tz_str})\n"
+                f"**Total time:** {hours} hours {minutes} mins\n"
+            )
+
+            if "note" in session_data and session_data["note"]:
+                log_message += f"**Note:** {session_data['note']}\n\n"
+
+            log_message += f"**Proof of Activity:**"
+
+
+            files_to_send = []
+            for attachment in message.attachments:
+                try:
+                    file = await attachment.to_file()
+                    files_to_send.append(file)
+                except Exception as e:
+                    # Log error but continue
+                    print(f"[PROOF ERROR] Error downloading attachment: {e}") 
+                
+            if not files_to_send:
+                print(f"[PROOF ERROR] No files could be downloaded from attachments")
+                await message.reply(
+                    "❌ **Error:** Could not process your image attachments.\n"
+                    "Please try sending them again.",
+                    mention_author=False
+                )
+                return
+                
+            image_urls = [attachment.url for attachment in message.attachments]
+
+            # Delete the original message
             try:
-                file = await attachment.to_file()
-                files_to_send.append(file)
+                await message.delete()
             except Exception as e:
-                # Log error but continue
-                print(f"Error downloading attachment before delete") 
+                print(f"[PROOF WARNING] Could not delete original message: {e}")
+                # Continue anyway - not critical
+                
+            # Post the formatted log with the image
+            posted_message = await message.channel.send(
+                content=log_message,
+                files=files_to_send
+            )
             
-        image_urls = [attachment.url for attachment in message.attachments]
+            print(f"[PROOF SUCCESS] Posted formatted log for {message.author.name}")
+            
+            files_to_send.clear()
 
-        await message.delete()
-            
-        # Post the formatted log with the image
-        await message.channel.send(
-            content=log_message,
-            files=files_to_send
-        )    
-        
-        files_to_send.clear()
+        except Exception as e:
+            print(f"[PROOF ERROR] Failed to process proof image: {e}")
+            import traceback
+            traceback.print_exc()
+            await message.reply(
+                "❌ **Error:** Something went wrong processing your activity proof.\n"
+                "Your session data has been lost. Please:\n"
+                "1. Use `/clockout` again\n"
+                "2. Immediately send your proof image\n\n"
+                "If this keeps happening, contact a bot admin.",
+                mention_author=False
+            )
 
         return  
     
@@ -297,37 +360,37 @@ async def find_username_in_title(title, usernames):
 async def update_deployment_board(message, user_id):
     # Deployment board when users react
     try:
-        # Get the user who reacted
         user = bot.get_user(user_id)
         if not user:
             return
         
-        # Check if user is already mentioned in the message
         if user.mention in message.content:
             return 
         
         lines = message.content.split('\n')
         
-        # Find the "**Operatives**" line and "React to join" line
         operatives_idx = None
         react_line_idx = None
         
         for i, line in enumerate(lines):
             if line.strip() == "**Operatives**":
                 operatives_idx = i
-            if "React with" in line or "React to join" in line:
+            if "React to join" in line or "React with" in line:
                 react_line_idx = i
                 break
         
         if operatives_idx is None or react_line_idx is None:
             return
         
-        # Check if "None" exists right after **Operatives**
-        # If so, replace it. Otherwise, insert before "React to join"
         if operatives_idx + 1 < len(lines) and lines[operatives_idx + 1].strip() == "None":
             lines[operatives_idx + 1] = user.mention
         else:
-            lines.insert(react_line_idx, user.mention)
+            insert_idx = react_line_idx
+            
+            if react_line_idx > 0 and lines[react_line_idx - 1].strip() == "":
+                insert_idx = react_line_idx - 1
+            
+            lines.insert(insert_idx, user.mention)
         
         new_content = '\n'.join(lines)
         

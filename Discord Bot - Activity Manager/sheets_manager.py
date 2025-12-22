@@ -10,7 +10,7 @@ class SheetsManager:
         self.worksheet = None
         self.connect()
         self.user_cache = {}
-        self.cache_duration = timedelta(minutes=5)
+        self.cache_duration = timedelta(minutes=1)
         self.last_full_load = None
         self.all_users_cache = []
     
@@ -76,7 +76,8 @@ class SheetsManager:
                 'rank': row_data[RANK_COLUMN-1] if len(row_data) > RANK_COLUMN-1 else "",
                 'status': row_data[STATUS_COLUMN] if len(row_data) > STATUS_COLUMN else "",
                 'loa_status': row_data[LOA_NOTICE_COLUMN] if len(row_data) > LOA_NOTICE_COLUMN else "",
-                'activity_checked': row_data[ACTIVITY_COLUMN] if len(row_data) > ACTIVITY_COLUMN else False
+                'activity_checked': row_data[ACTIVITY_COLUMN] if len(row_data) > ACTIVITY_COLUMN else False,
+                'codename': row_data[CODENAME_COLUMN] if len(row_data) > CODENAME_COLUMN else ""
             }
         except Exception as e:
             print(f"Error getting user data: {e}")
@@ -193,93 +194,78 @@ class SheetsManager:
             # Set Squadron 
             self.worksheet.update_cell(next_row, 7, squadron)
             
-            # Set Status to formula
-            status_formula = f'=IF(J{next_row}=TRUE;"Active";"Inactive")'
-            self.worksheet.update_cell(next_row, 9, status_formula)
+            # Set Discord ID
+            self.worksheet.update_cell(next_row, DISCORD_ID_COLUMN + 1, discord_id)
             
-            # Uncheck Activity checkbox 
-            self.worksheet.update_cell(next_row, 10, False)
+            # Set initial points to 0
+            self.worksheet.update_cell(next_row, POINTS_COLUMN + 1, 0)
             
-            # Set LoA Notice to N/A 
-            self.worksheet.update_cell(next_row, 11, "N/A")
+            # Set Activity checkbox to False (unchecked)
+            self.worksheet.update_cell(next_row, ACTIVITY_COLUMN + 1, False)
             
-            # Set Removal to N/A 
-            self.worksheet.update_cell(next_row, 12, "N/A")
+            # Set LoA status to N/A
+            self.worksheet.update_cell(next_row, LOA_NOTICE_COLUMN + 1, "N/A")
             
-            # Set C+D ACCRED to N/A 
-            self.worksheet.update_cell(next_row, 13, "N/A")
-            
-            # Clear Notes 
-            self.worksheet.update_cell(next_row, 14, "")
-            
-            # Reset Points to 0 
-            self.worksheet.update_cell(next_row, 16, 0)
-            
-            # Set Discord ID 
-            self.worksheet.update_cell(next_row, 17, discord_id)
-            
-            print(f"Successfully created entry for {username} with rank E1 and squadron {squadron}")
             return True
             
         except Exception as e:
-            print(f"Error creating new user entry for {username}: {e}")
+            print(f"Error creating new user entry: {e}")
             return False
 
     def find_next_empty_row(self):
-        # Find the next empty row to add a new user
+        # Find the first empty row in the worksheet
         try:
             all_values = self.worksheet.get_all_values()
             
-            for i, row in enumerate(all_values[3:], start=4):
-                if len(row) <= 1 or not row[1].strip():  
-                    return i
+            # Start from row 4
+            for i in range(3, len(all_values)):
+                row = all_values[i]
+                
+                # Check if username column (B/index 1) is empty
+                if len(row) <= 1 or not row[1].strip():
+                    return i + 1
             
-            # If no empty row found, add to the end
+            # Return the next row after all data
             return len(all_values) + 1
             
         except Exception as e:
             print(f"Error finding next empty row: {e}")
-            return 4  # Default to row 4 if error
+            return 4  # Default starting row
     
     def load_points_from_spreadsheet(self, user_points):
-        # Load points from spreadsheet using Discord IDs
+        # Load all points into the user_points dictionary
         try:
-            print("Loading points from spreadsheet...")
             all_values = self.worksheet.get_all_values()
             
-            # Load points using Discord IDs
-            for i, row in enumerate(all_values[3:], start=4):
-                if len(row) > max(POINTS_COLUMN, DISCORD_ID_COLUMN):
-                    discord_id = row[DISCORD_ID_COLUMN] if len(row) > DISCORD_ID_COLUMN else ""
-                    points = row[POINTS_COLUMN] if len(row) > POINTS_COLUMN else "0"
+            for row in all_values[3:]:  # Skip header rows
+                if len(row) > POINTS_COLUMN:
+                    username = row[USERNAME_COLUMN].strip() if row[USERNAME_COLUMN] else ""
+                    points_str = row[POINTS_COLUMN].strip() if row[POINTS_COLUMN] else "0"
                     
-                    if discord_id and points.isdigit():
-                        user_points[discord_id] = int(points)
+                    if username:
+                        try:
+                            user_points[username] = int(points_str) if points_str.isdigit() else 0
+                        except ValueError:
+                            user_points[username] = 0
             
-            print(f"Loaded {len(user_points)} user points from spreadsheet")
-            
+            print(f"Loaded points for {len(user_points)} users")
         except Exception as e:
             print(f"Error loading points from spreadsheet: {e}")
-            user_points.clear()
     
-    def save_points_to_spreadsheet(self, discord_user_id, points, username=None):
-        # Save points to spreadsheet using username from thread title
+    def update_points(self, username, points):
+        # Update user's points in the spreadsheet
         try:
-            if not username:
-                print(f"No username provided, cannot save points")
-                return
-            
-            # Find the user's row by username in column B
             cell = self.worksheet.find(username)
             row_index = cell.row
-            
-            # Update the points column (P) for this user
             self.worksheet.update_cell(row_index, POINTS_COLUMN + 1, points)
             
-            print(f"Successfully saved {points} points for {username}")
+            # Invalidate cache
+            self.invalidate_user_cache(username)
             
+            return True
         except Exception as e:
-            print(f"Error saving points for {username}: {e}")
+            print(f"Error updating points for {username}: {e}")
+            return False
     
     def format_cell_black(self, row, col):
         # Make a cell have black background
@@ -443,8 +429,8 @@ class SheetsManager:
         promotions = {
             "E1": {"next_rank": "E2", "points_needed": 10, "needs_app": False},
             "E2": {"next_rank": "E3", "points_needed": 30, "needs_app": False},
-            "E3": {"next_rank": "E4", "points_needed": 50, "needs_app": True},
-            "E4": {"next_rank": "E5", "points_needed": 70, "needs_app": False},
+            "E3": {"next_rank": "E4", "points_needed": 50, "needs_app": False},
+            "E4": {"next_rank": "E5", "points_needed": 70, "needs_app": True},
         }
         
         if current_rank in promotions:
@@ -458,6 +444,25 @@ class SheetsManager:
         
         return {"eligible": False}
     
+    def update_user_rank(self, username, new_rank):
+        # Update user's rank in the spreadsheet
+        try:
+            cell = self.worksheet.find(username)
+            row_index = cell.row
+            
+            # Update the rank column
+            self.worksheet.update_cell(row_index, RANK_COLUMN, new_rank)
+            
+            # Invalidate cache for this user
+            self.invalidate_user_cache(username)
+            
+            print(f"Updated {username}'s rank to {new_rank} in spreadsheet")
+            return True
+            
+        except Exception as e:
+            print(f"Error updating rank for {username}: {e}")
+            return False
+
     def get_user_rank(self, username):
         # Get user's rank from spreadsheet
         try:

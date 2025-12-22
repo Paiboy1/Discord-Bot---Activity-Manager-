@@ -3,9 +3,10 @@ import discord
 from config import *
 
 class ActivityHandler:
-    def __init__(self, sheets_manager, user_points):
+    def __init__(self, sheets_manager, user_points, role_manager=None):
         self.sheets_manager = sheets_manager
         self.user_points = user_points
+        self.role_manager = role_manager
         
     # Main activity log processing logic
     async def process_activity_log(self, message):
@@ -95,13 +96,53 @@ class ActivityHandler:
                     self.sheets_manager.batch_update_cells(updates)
                 
                 # Check promotion with data we already have
-                promo_check = self.check_promotion_eligibility_from_data(
+                promo_check = self.sheets_manager.check_promotion_eligibility_from_data(
                     new_total, user_data['rank']
                 )
                 
+                # Auto-promote if eligible and doesn't need application
+                if promo_check["eligible"] and not promo_check.get("needs_application", False) and self.role_manager:
+                    member = message.channel.owner
+                    if member:
+                        await self.role_manager.auto_rank(member, promo_check['next_rank'])
+                
                 # Send response
-                await self.send_approval_message(message, hours, mins, new_total, 
-                                                promo_check, is_on_loa)
+                if hours >= MIN_HOURS_FOR_POINTS:
+                    points_to_award = hours * POINTS_PER_HOUR
+                    
+                    # Make promotion message if eligible
+                    promo_message = ""
+                    if promo_check["eligible"]:
+                        if promo_check.get("needs_application", False):
+                            promo_message = f"\n• **🎖️ Promotion Available:** Eligible for **{promo_check['next_rank']}**\n• Please complete the MR Ascension form: {MR_ASCENSION_FORM_URL} to be eligible for **E5**"
+                        else:
+                            promo_message = f"\n• **🏆 PROMOTED:** You have been promoted to **{promo_check['next_rank']}**!"
+                    
+                    # Different messages based on LOA status
+                    if is_on_loa:
+                        await message.reply(
+                            f"✅ **Activity Logged Successfully!**\n"
+                            f"• Time logged: {hours} hours {mins} mins\n"
+                            f"• Points awarded: {points_to_award} points\n"
+                            f"• Total points: {new_total} points\n"
+                            f"• **Note:** You are on LOA - points awarded but activity not counted",
+                            mention_author=False
+                        )
+                    else:
+                        await message.reply(
+                            f"✅ **Activity Logged Successfully!**\n"
+                            f"• Time logged: {hours} hours {mins} mins\n"
+                            f"• Points awarded: {points_to_award} points\n"
+                            f"• Total points: {new_total} points\n"
+                            f"{promo_message}",
+                            mention_author=False
+                        )
+                else:
+                    await message.reply(
+                        f"✅ Logged! Please note that this log does not meet the minimum requirement of 1 hour.",
+                        mention_author=False
+                    )
+                
             else:
                 # Just update activity if needed
                 if updates:
@@ -138,60 +179,3 @@ class ActivityHandler:
             return (0, mins)
         
         return None
-    
-    # Award points from activity logs
-    async def award_points(self, discord_user_id, hours, mins, username, message, is_on_loa=False):
-        points_to_award = hours * POINTS_PER_HOUR
-        
-        # Get current points from spreadsheet
-        try:
-            cell = self.sheets_manager.worksheet.find(username)
-            row_index = cell.row
-            
-            # Get current points from spreadsheet
-            current_points_cell = self.sheets_manager.worksheet.cell(row_index, POINTS_COLUMN + 1)
-            current_points = int(current_points_cell.value) if current_points_cell.value and str(current_points_cell.value).isdigit() else 0
-            
-            # Calculate new total
-            new_total = current_points + points_to_award
-            
-            # Save new total to spreadsheet
-            self.sheets_manager.save_points_to_spreadsheet(str(discord_user_id), new_total, username)
-
-             # Check promotion eligibility after updating points
-            promo_check = self.sheets_manager.check_promotion_eligibility(username)
-            
-            # Make promotion message if eligible
-            promo_message = ""
-            if promo_check["eligible"]:
-                if promo_check["needs_application"]:
-                    promo_message = f"\n• **🎖️ Promotion Available:** Eligible for **{promo_check['next_rank']}**\n• Please complete the MR Ascension form: {MR_ASCENSION_FORM_URL} to be eligible for **E5**"
-                else:
-                    promo_message = f"\n• **🎖️ Promotion Available:** Eligible for **{promo_check['next_rank']}**"
-        
-            
-            # Different messages based on LOA status
-            if is_on_loa:
-                await message.reply(
-                    f"✅ **Activity Logged Successfully!**\n"
-                    f"• Time logged: {hours} hours {mins} mins\n"
-                    f"• Points awarded: {points_to_award} points\n"
-                    f"• Total points: {new_total} points\n"
-                    f"• **Note:** You are on LOA - points awarded but activity not counted",
-                    mention_author=False
-                )
-            else:
-                # Check if they need the MR Ascension promotion
-                mention_user = promo_check.get("needs_application", False)
-
-                await message.reply(
-                    f"✅ **Activity Logged Successfully!**\n"
-                    f"• Time logged: {hours} hours {mins} mins\n"
-                    f"• Points awarded: {points_to_award} points\n"
-                    f"• Total points: {new_total} points\n"
-                    f"{promo_message}",
-                    mention_author=False
-                )
-            
-        except Exception as e:
-            print(f"Error getting current points for {username}: {e}")
