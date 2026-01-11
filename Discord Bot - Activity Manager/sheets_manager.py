@@ -190,12 +190,20 @@ class SheetsManager:
             
             # Set Rank to E1 
             self.worksheet.update_cell(next_row, 6, "E1")
+
+            # Set Status
+            status_formula = f'=IF(J{next_row}=TRUE;"Active";"Inactive")'
+            self.worksheet.update_cell(next_row, STATUS_COLUMN, status_formula)
             
             # Set Squadron 
             self.worksheet.update_cell(next_row, 7, squadron)
             
             # Set Discord ID
             self.worksheet.update_cell(next_row, DISCORD_ID_COLUMN + 1, discord_id)
+
+            # Set Notes
+            notes_formula = f'=IFS(P{next_row}>=200;"Can move up to E9, awaiting promo board"; P{next_row}>=150;"Can move up to E8, awaiting promo board"; P{next_row}>=120;"Can move up to E7, awaiting promo board"; P{next_row}>=90;"Can move up to E6, awaiting promo board"; P{next_row}>=70;"Eligible for E5"; P{next_row}>=50;"Eligible for E4"; P{next_row}>=30;"Eligible for E3"; P{next_row}>=10;"Eligible for E2"; TRUE;"None")'
+            self.worksheet.update_cell(next_row, NOTES_COLUMN, notes_formula)
             
             # Set initial points to 0
             self.worksheet.update_cell(next_row, POINTS_COLUMN + 1, 0)
