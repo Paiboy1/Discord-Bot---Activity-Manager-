@@ -326,10 +326,14 @@ class SheetsManager:
             # Update LoA NOTICE column back to N/A
             self.worksheet.update_cell(row_index, LOA_NOTICE_COLUMN + 1, "N/A")
             print(f"Updated LoA NOTICE to N/A")
+
+            # Remove the note from the LOA cell
+            self.remove_loa_note(username)
             
             # The STATUS column should use a formula that checks the activity checkbox
             original_formula = f'=IF(J{row_index}=TRUE;"Active";"Inactive")'
             self.worksheet.update_cell(row_index, STATUS_COLUMN + 1, original_formula)
+            self.worksheet.format(f"{gspread.utils.rowcol_to_a1(row_index, STATUS_COLUMN + 1)}", {"textFormat": {"bold": True}})
             
             # Then apply the red background formatting
             self.format_cell_red(row_index, STATUS_COLUMN + 1)
@@ -389,20 +393,18 @@ class SheetsManager:
             
             all_values = self.worksheet.get_all_values()
             
-            # Find the last row with actual user data (not just any data)
-            last_user_row = 3  # Start from row 3 (index for row 4)
+            # Find the last row with actual user data
+            last_user_row = 3 
             for i, row in enumerate(all_values[3:], start=4):  # Start checking from row 4
-                # Check if this row has a username (column A or B)
                 if len(row) > 1 and (row[0].strip() or row[1].strip()):
                     last_user_row = i
                 else:
-                    break  # Stop when we hit the first empty username row
+                    break 
             
             if last_user_row >= 4:
                 # Create list of False values for the range
                 false_values = [[False] for _ in range(4, last_user_row + 1)]
                 
-                # Use batch update instead of individual cell updates
                 range_name = f'J4:J{last_user_row}'
                 self.worksheet.update(range_name, false_values)
                 
@@ -474,3 +476,74 @@ class SheetsManager:
         except Exception as e:
             print(f"Error getting rank for {username}: {e}")
             return None
+        
+    def add_loa_note(self, username, note_text):
+        # Add a note to the LOA cell for a user
+        try:
+            cell = self.worksheet.find(username)
+            row_index = cell.row
+            
+            # LOA Notice column
+            loa_cell = self.worksheet.cell(row_index, LOA_NOTICE_COLUMN + 1)
+            
+            # Add note using gspread's note feature
+            cell_address = f"{chr(65 + LOA_NOTICE_COLUMN)}{row_index}"
+            
+            # Use the gspread API to add a note
+            try:
+                # Get the cell and update its note
+                self.worksheet.update_note(cell_address, note_text)
+                print(f"Added note to {cell_address}: {note_text}")
+                return True
+            except AttributeError:
+                print(f"Error adding note")
+                return False
+                
+        except Exception as e:
+            print(f"Error adding LOA note for {username}: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+    
+    def remove_loa_note(self, username):
+        # Remove note from the LOA cell for a user
+        try:
+            cell = self.worksheet.find(username)
+            row_index = cell.row
+            
+            # LOA Notice column
+            cell_address = f"{chr(65 + LOA_NOTICE_COLUMN)}{row_index}"
+            
+            # Remove note by setting it to empty string
+            try:
+                # Use batch update to remove note
+                requests = [{
+                    'updateCells': {
+                        'range': {
+                            'sheetId': self.worksheet.id,
+                            'startRowIndex': row_index - 1,
+                            'endRowIndex': row_index,
+                            'startColumnIndex': LOA_NOTICE_COLUMN,
+                            'endColumnIndex': LOA_NOTICE_COLUMN + 1
+                        },
+                        'rows': [{
+                            'values': [{
+                                'note': None
+                            }]
+                        }],
+                        'fields': 'note'
+                    }
+                }]
+                
+                self.spreadsheet.batch_update({'requests': requests})
+                print(f"Removed note from {cell_address}")
+                return True
+            except Exception as batch_error:
+                print(f"Error removing note via batch update: {batch_error}")
+                return False
+                
+        except Exception as e:
+            print(f"Error removing LOA note for {username}: {e}")
+            import traceback
+            traceback.print_exc()
+            return False

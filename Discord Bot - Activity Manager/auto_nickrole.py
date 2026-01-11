@@ -20,6 +20,11 @@ class RoleManager:
             "E2": "[PV2]",
             "E3": "[PFC]",
             "E4": "[CPL]",
+            "E5": "[SGT]",
+            "E6": "[SSG]",
+            "E7": "[SFC]",
+            "E8": "[MSG]",
+            "E9": "[SGM]",
         }
     
     async def auto_rank(self, member, new_rank):
@@ -141,3 +146,209 @@ class RoleManager:
             import traceback
             traceback.print_exc()
             return False
+    
+    async def set_loa_nickname(self, member):
+        # Set LOA nickname: [LOA] "CODENAME" | username OR [LOA] username
+        try:
+            # Get username from spreadsheet using Discord ID
+            username = self.sheets_manager.get_username_by_discord_id(str(member.id))
+            if not username:
+                print(f"Error: Could not find username for Discord ID {member.id}")
+                return False
+            
+            # Get user data from spreadsheet
+            user_data = self.sheets_manager.batch_get_user_data(username)
+            if not user_data:
+                print(f"Error: Could not find user data for {username}")
+                return False
+            
+            codename = user_data.get('codename', '').strip()
+            has_codename = codename.startswith('"') and codename.endswith('"')
+            
+            # Format: [LOA] "CODENAME" | username OR [LOA] username
+            if has_codename:
+                new_nickname = f"[LOA] {codename} | {username}"
+            else:
+                new_nickname = f"[LOA] {username}"
+            
+            # Handle 32 character limit
+            if len(new_nickname) > 32:
+                if has_codename:
+                    prefix_and_codename = f"[LOA] {codename} | "
+                    if len(prefix_and_codename) < 32:
+                        remaining = 32 - len(prefix_and_codename)
+                        username_truncated = username[:remaining]
+                        new_nickname = f"{prefix_and_codename}{username_truncated}"
+                    else:
+                        # Codename too long, just use [LOA] + username
+                        new_nickname = f"[LOA] {username}"
+                        if len(new_nickname) > 32:
+                            username_truncated = username[:26]  # 32 - 6 for "[LOA] "
+                            new_nickname = f"[LOA] {username_truncated}"
+                else:
+                    username_truncated = username[:26]
+                    new_nickname = f"[LOA] {username_truncated}"
+            
+            try:
+                if member.guild.owner_id != member.id:
+                    await member.edit(nick=new_nickname)
+                    return True
+                else:
+                    return False
+            except discord.Forbidden as e:
+                return False
+            except Exception as e:
+                return False
+                
+        except Exception as e:
+            print(f"Error in set_loa_nickname: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+    
+    async def set_loa_role(self, member):
+        # Add LOA role to member
+        try:
+            guild = member.guild
+            loa_role = guild.get_role(LOA_ROLE_ID)
+            
+            if not loa_role:
+                return False
+            
+            if loa_role not in member.roles:
+                await member.add_roles(loa_role)
+                return True
+            else:
+                return True
+                
+        except Exception as e:
+            print(f"Error in set_loa_role: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+    
+    async def remove_loa_role(self, member):
+        # Remove LOA role from member
+        try:
+            guild = member.guild
+            loa_role = guild.get_role(LOA_ROLE_ID)
+            
+            if not loa_role:
+                return False
+            
+            if loa_role in member.roles:
+                await member.remove_roles(loa_role)
+                return True
+            else:
+                return True
+                
+        except Exception as e:
+            print(f"Error in remove_loa_role: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+    
+    async def restore_rank_nickname(self, member):
+        # Restore rank nickname after LOA: [RANK] "CODENAME" | username OR [RANK] username
+        try:
+            # Get username from spreadsheet using Discord ID
+            username = self.sheets_manager.get_username_by_discord_id(str(member.id))
+            if not username:
+                print(f"Error: Could not find username for Discord ID {member.id}")
+                return False
+            
+            # Get user data from spreadsheet
+            user_data = self.sheets_manager.batch_get_user_data(username)
+            if not user_data:
+                print(f"Error: Could not find user data for {username}")
+                return False
+            
+            rank = user_data['rank']
+            codename = user_data.get('codename', '').strip()
+            has_codename = codename.startswith('"') and codename.endswith('"')
+            
+            print(f"[DEBUG restore_rank_nickname] Username: {username}, Rank: {rank}, Codename: {codename}")
+            
+            # Get rank prefix
+            rank_prefix = self.rank_prefixes.get(rank, "")
+            if not rank_prefix:
+                print(f"Warning: No prefix found for rank {rank}, using [UNK]")
+                rank_prefix = "[UNK]"
+            
+            # Format: [RANK] "CODENAME" | username OR [RANK] username
+            if has_codename:
+                new_nickname = f"{rank_prefix} {codename} | {username}"
+            else:
+                new_nickname = f"{rank_prefix} {username}"
+            
+            # Handle 32 character limit
+            if len(new_nickname) > 32:
+                if has_codename:
+                    prefix_and_codename = f"{rank_prefix} {codename} | "
+                    if len(prefix_and_codename) < 32:
+                        remaining = 32 - len(prefix_and_codename)
+                        username_truncated = username[:remaining]
+                        new_nickname = f"{prefix_and_codename}{username_truncated}"
+                    else:
+                        # Codename too long, just use rank + username
+                        new_nickname = f"{rank_prefix} {username}"
+                        if len(new_nickname) > 32:
+                            max_name_length = 32 - len(rank_prefix) - 1
+                            username_truncated = username[:max_name_length]
+                            new_nickname = f"{rank_prefix} {username_truncated}"
+                else:
+                    max_name_length = 32 - len(rank_prefix) - 1
+                    username_truncated = username[:max_name_length]
+                    new_nickname = f"{rank_prefix} {username_truncated}"
+            
+            try:
+                print(f"[DEBUG restore_rank_nickname] Attempting to set nickname: {new_nickname}")
+                if member.guild.owner_id != member.id:
+                    await member.edit(nick=new_nickname)
+                    print(f"[DEBUG restore_rank_nickname] Updated nickname to: {new_nickname}")
+                    return True
+                else:
+                    print(f"[DEBUG restore_rank_nickname] Cannot change nickname - user is server owner")
+                    return False
+            except discord.Forbidden as e:
+                print(f"[DEBUG restore_rank_nickname] No permission to change nickname: {e}")
+                return False
+            except Exception as e:
+                print(f"[DEBUG restore_rank_nickname] Error changing nickname: {e}")
+                return False
+                
+        except Exception as e:
+            print(f"Error in restore_rank_nickname: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

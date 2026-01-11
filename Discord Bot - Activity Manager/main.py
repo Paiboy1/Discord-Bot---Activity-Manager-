@@ -2,7 +2,7 @@
 
 import re
 import discord
-from discord.ext import commands
+from discord.ext import tasks, commands
 from config import *
 from sheets_manager import SheetsManager
 from commands import Commands
@@ -15,6 +15,8 @@ sheets_manager = SheetsManager()
 user_points = {}
 active_log = {}
 pending_proof = {}
+
+last_row_count = 0 # This is for MR form notifier
 
 # Load timezones from file
 timezone_offsets = sheets_manager.load_timezones_from_txt()
@@ -31,7 +33,7 @@ role_manager = RoleManager(bot, sheets_manager)
 # Initialize handlers
 activity_handler = ActivityHandler(sheets_manager, user_points, role_manager)
 commands_handler = Commands(bot, sheets_manager, user_points, active_log, pending_proof, timezone_offsets, role_manager)
-loa_handler = LOAHandler(sheets_manager)
+loa_handler = LOAHandler(sheets_manager, role_manager=role_manager)
 
 def get_squadron_from_roles(member):
     # Extract squadron from user's Discord roles
@@ -52,6 +54,31 @@ def get_squadron_from_roles(member):
     print(f"DEBUG: No squadron role found for {member.display_name}, using fallback: Protection")
     return "Protection"
 
+@tasks.loop(minutes=1.0) # This needs to be up here because it needs to be before def on_ready
+async def check_for_new_entries():
+    global last_row_count
+    try:
+        spreadsheet = sheets_manager.client.open_by_url(MR_ASCENSION_URL)
+        worksheet = spreadsheet.worksheet("Odpovede z formulára 1")
+        
+        all_values = worksheet.col_values(1)
+        current_rows = len(all_values)
+
+        if last_row_count == 0:
+            last_row_count = current_rows
+            return
+
+        if current_rows > int(last_row_count):
+            channel = bot.get_channel(MR_SHEETS_NOTIFIER_ID)
+            if channel:
+                await channel.send(
+                    f"🔔 **New Ascension Form Entry!**\n"
+                    f"🔗 (<{MR_ASCENSION_SHEETS_URL}>)",
+                )
+            last_row_count = current_rows
+    except Exception as e:
+        print(f"Error checking for new entries: {e}")
+
 @bot.event
 async def on_ready():
     print(f'Logged in as {bot.user}')
@@ -62,6 +89,9 @@ async def on_ready():
     
     # Setup commands
     commands_handler.setup_commands()
+
+    if not check_for_new_entries.is_running():
+        check_for_new_entries.start()
     
     # Join forum threads
     await join_forum_threads()
@@ -96,10 +126,10 @@ async def on_thread_create(thread):
             "I am the **Activity Manager** for this department. Please log your activity using the following slash commands:\n\n"
             
             "1. **Start Session:** Use `/clockin timezone:`\n"
-            "   * Example: `/clockin timezone:BST`*\n\n"
+            "   * Example: `/clockin timezone:BST`\n\n"
             
             "2. **End Session:** Use `/clockout` (Optional: add a `note:`)\n"
-            "   * Example: `/clockout note:I was with so and so for an hour`*\n\n"
+            "   * Example: `/clockout note:I was with so and so for an hour`\n\n"
             
             "3. **Post Proof:** After clocking out, submit your **proof image** here in this thread. The bot will automatically post your formatted log.\n\n"
             
@@ -244,18 +274,11 @@ async def on_message(message):
                 "Your session data has been lost. Please:\n"
                 "1. Use `/clockout` again\n"
                 "2. Immediately send your proof image\n\n"
-                "If this keeps happening, contact a bot admin.",
+                "If this keeps happening, contact paiboy/foxhole.",
                 mention_author=False
             )
 
         return  
-    
-
-    # Handle LOA requests in LOA channel
-    if message.channel.id == LOA_CHANNEL_ID:
-        if loa_handler.is_valid_loa_format(message.content):
-            # Just return, don't add any reactions - let a Officer do reactions
-            return
     
     # Handle activity logs in forum channel
     if (hasattr(message.channel, 'parent_id') and 
@@ -300,12 +323,9 @@ async def on_raw_reaction_add(payload):
             channel = bot.get_channel(payload.channel_id)
             message = await channel.fetch_message(payload.message_id)
             
-            # Check if message contains LOA format
-            if loa_handler.is_valid_loa_format(message.content):
-                loa_data = loa_handler.extract_loa_data(message.content)
-                
-                if loa_data:
-                    await loa_handler.process_loa_approval(message, loa_data)
+            # Process LOA approval (no format checking, just use Discord ID)
+            await loa_handler.process_loa_approval(message)
+        
         except Exception as e:
             print(f"Error processing LOA reaction: {e}")
     

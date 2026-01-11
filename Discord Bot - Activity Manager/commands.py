@@ -145,6 +145,12 @@ class Commands:
             callback=self.deploy
         ))
 
+        self.bot.tree.add_command(app_commands.Command(
+            name="pause",
+            description="Pause/unpause your activity timer",
+            callback=self.pause_timer
+        ))
+
     def parse_timezone(self, timezone_str):
         # Handle every timezone using the loaded Timezones.txt file
         if not timezone_str:
@@ -172,7 +178,7 @@ class Commands:
             return
         
         rank_hierarchy = {
-            "E9": 9, "E8": 8, "E7": 7, "E6": 6,
+            "E9B": 10, "E9": 9, "E8": 8, "E7": 7, "E6": 6,
             "E5": 5, "E4": 4, "E3": 3, "E2": 2, "E1": 1
         }
         
@@ -508,6 +514,7 @@ class Commands:
             
             # First try to get username by Discord ID from spreadsheet
             username = str(user.id)
+            id = user.id
             
             if not username:
                 # If not found by Discord ID, try to extract from display name
@@ -525,8 +532,8 @@ class Commands:
                 return
             
             # Try to remove LOA status directly
-            success = self.sheets_manager.remove_loa_status(username)
-            
+            success = self.sheets_manager.remove_loa_status(username), await self.role_manager.remove_loa_role(user), await self.role_manager.restore_rank_nickname(user)
+
             if success:
                 await interaction.followup.send(
                     f"✅ **LOA Status Removed**\n"
@@ -586,7 +593,9 @@ class Commands:
         self.active_log[user_id] = {
             "start_time": datetime.now(tz.utc),
             "timezone": timezone.upper() if timezone else None,
-            "username": username
+            "username": username,
+            "total_paused": timedelta(0),
+            "paused": False
         }
 
         print(f"[CLOCKIN] User {user_id} clocked in with timezone: {timezone.upper()}")
@@ -602,7 +611,6 @@ class Commands:
         
         user_id = interaction.user.id
         
-        # Check if the user is currently clocked in
         if user_id not in self.active_log:
             await interaction.response.send_message(
                 "⚠️ You are not currently clocked in. Use `/clockin` to start your session.",
@@ -610,16 +618,27 @@ class Commands:
             )
             return
         
+        # 1. Pull the session data
         session_data = self.active_log.pop(user_id)
-        session_data["end_time"] = datetime.now(tz.utc)
+        end_time = datetime.now(tz.utc)
+        session_data["end_time"] = end_time
         
-        # Calculate total time BEFORE adding to pending_proof (prevents race condition)
-        total_time_delta = session_data["end_time"] - session_data["start_time"]
+        # 2. Calculate Total Paused Time
+        total_paused = session_data.get("total_paused", timedelta(0))
+        
+        # If the user is currently paused while clocking out
+        if session_data.get("paused", False) and "pause_start" in session_data:
+            final_pause_duration = end_time - session_data["pause_start"]
+            total_paused += final_pause_duration
+
+        # 3. Calculate actual active time: (Total Duration) - (Paused Duration)
+        total_time_delta = (end_time - session_data["start_time"]) - total_paused
         session_data["total_time"] = total_time_delta
 
         if note:
             session_data["note"] = note
 
+        # Response to user
         await interaction.response.send_message(
             "✅ You are now **Offline!**\n\n"
             "Please send your proof image in your activity thread.\n"
@@ -631,16 +650,11 @@ class Commands:
         # Start 5-minute timer
         asyncio.create_task(self._proof_timeout_handler(user_id, interaction.user))
         
-        # Move session data to pending_proof (ALL data must be ready before this!)
+        # Move session data to pending_proof
         self.pending_proof[user_id] = session_data
-        print(f"[CLOCKOUT] User {user_id} added to pending_proof. Current pending: {list(self.pending_proof.keys())}")
-
-        await self.update_status_board()
         
-        # Calculate time components for display
-        total_seconds = int(total_time_delta.total_seconds())
-        hours = total_seconds // 3600
-        minutes = (total_seconds % 3600) // 60
+        # Update status board
+        await self.update_status_board()
     
     async def _proof_timeout_handler(self, user_id, user):
         # Handle timeout if user doesn't send proof within 5 minutes
@@ -663,28 +677,103 @@ class Commands:
         
         user_id = interaction.user.id
         
-        # Check if user is clocked in
         if user_id not in self.active_log:
             await interaction.response.send_message(
-                "⚠️ You are not currently clocked in.",
+                "❌ You don't have an active log. Use `/clockin` to start one!",
                 ephemeral=True
             )
             return
         
-        session_data = self.active_log[user_id]
-        start_time = session_data["start_time"]
-        current_time = datetime.now(tz.utc)
+        session = self.active_log[user_id]
+        start_time = session["start_time"]
         
         # Calculate elapsed time
+        current_time = datetime.now(tz.utc)
         elapsed = current_time - start_time
-        total_seconds = int(elapsed.total_seconds())
-        hours = total_seconds // 3600
-        minutes = (total_seconds % 3600) // 60
         
-        # Build simple response
-        response = f"You have been clocked in for: **{hours} hours {minutes} mins**"
+        # Subtract total paused time
+        total_paused = session.get("total_paused", timedelta(0))
         
-        await interaction.response.send_message(response, ephemeral=True)
+        # If currently paused, add current pause duration
+        if session.get("paused", False) and "pause_start" in session:
+            current_pause = current_time - session["pause_start"]
+            total_paused += current_pause
+        
+        # Calculate actual active time
+        active_time = elapsed - total_paused
+        
+        hours = int(active_time.total_seconds() // 3600)
+        minutes = int((active_time.total_seconds() % 3600) // 60)
+        
+        # Build status message
+        status = "**PAUSED**" if session.get("paused", False) else "**ACTIVE**"
+        
+        pause_info = ""
+        if total_paused.total_seconds() > 0:
+            pause_minutes = int(total_paused.total_seconds() // 60)
+            pause_info = f"\n• Total paused time: {pause_minutes} minutes"
+        
+        await interaction.response.send_message(
+            f"{status}\n"
+            f"• Active time: {hours} hours {minutes} minutes"
+            f"{pause_info}",
+            ephemeral=True
+        )
+    
+    async def pause_timer(self, interaction: discord.Interaction):
+        if not await self._check_server(interaction):
+            return
+        
+        user_id = interaction.user.id
+        
+        # Check if user has an active session
+        if user_id not in self.active_log:
+            await interaction.response.send_message(
+                "❌ You don't have an active log running. Use `/clockin` first.",
+                ephemeral=True
+            )
+            return
+        
+        session = self.active_log[user_id]
+        
+        # Check if already paused
+        if session.get("paused", False):
+            # Unpause
+            pause_time = session.get("pause_start")
+            if pause_time:
+                # Calculate how long they were paused
+                paused_duration = datetime.now(tz.utc) - pause_time
+                
+                # Add paused time to total paused time
+                if "total_paused" not in session:
+                    session["total_paused"] = timedelta(0)
+                session["total_paused"] += paused_duration
+                
+                # Remove pause markers
+                session["paused"] = False
+                session.pop("pause_start", None)
+                
+                await interaction.response.send_message(
+                    f"• Timer is now running again",
+                    ephemeral=True
+                )
+                print(f"[PAUSE] User {interaction.user.name} resumed timer (paused for {paused_duration})")
+            else:
+                await interaction.response.send_message(
+                    "Error: Timer is marked as paused but no pause time found.",
+                    ephemeral=True
+                )
+        else:
+            # Pause
+            session["paused"] = True
+            session["pause_start"] = datetime.now(tz.utc)
+            
+            await interaction.response.send_message(
+                f"• Your activity timer has been paused\n"
+                f"• Use `/pause` again to resume\n",
+                ephemeral=True
+            )
+            print(f"[PAUSE] User {interaction.user.name} paused timer")
 
     # Deployment command to start 
     @app_commands.describe(note="What the deployment is about")
