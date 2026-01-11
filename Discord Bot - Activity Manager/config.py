@@ -29,6 +29,7 @@ STATUS_COLUMN = 8       # Column H
 DISCORD_ID_COLUMN = 16  # Column Q
 RANK_COLUMN = 6         # Column F
 CODENAME_COLUMN = 3     # Column D
+NOTES_COLUMN = 13       # Column N
 
 # Points system
 POINTS_PER_HOUR = 5
@@ -38,6 +39,7 @@ MIN_HOURS_FOR_POINTS = 1
 MR_ASCENSION_FORM_URL = 'https://tinyurl.com/MR-Ascension-App'
 MR_ASCENSION_SHEETS_URL = 'https://tinyurl.com/MR-Ascension-Sheets'
 MR_ASCENSION_URL = "https://docs.google.com/spreadsheets/d/1idllSgKy1cqccX_2cB3ZksagIFRj8Sq4u_yWiMHTxa8/edit?usp=sharing"
+
 
 
 
